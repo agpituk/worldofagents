@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-arena}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arena}
+      POSTGRES_DB: ${POSTGRES_DB:-arena}
+    ports:
+      # Host port deliberately uncommon to avoid colliding with other local Postgres instances.
+      - "${POSTGRES_HOST_PORT:-47432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-arena}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "${REDIS_HOST_PORT:-47379}:6379"
+    volumes:
+      - redis-data:/data
+
+  world-api:
+    build:
+      context: ./world-api
+      dockerfile: Dockerfile
+    environment:
+      ARENA_SHARED_SECRET: ${ARENA_SHARED_SECRET:-dev-secret}
+      POSTGRES_USER: ${POSTGRES_USER:-arena}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arena}
+      POSTGRES_DB: ${POSTGRES_DB:-arena}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      WORLD_TICK_SECONDS: ${WORLD_TICK_SECONDS:-6}
+      GATEWAY_BASE_URL: http://llm-gateway:8001
+      CQ_ENABLED: ${CQ_ENABLED:-0}
+      CQ_ADDR: ${CQ_ADDR:-}
+      CQ_API_KEY: ${CQ_API_KEY:-}
+    ports:
+      - "${WORLD_API_PORT:-47800}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      # Only mount source dirs — do NOT mount over /app or we'd shadow the .venv
+      - ./world-api/app:/app/app
+      - ./world-api/alembic:/app/alembic
+      - ./world-api/alembic.ini:/app/alembic.ini
+      # Bot SDK is bind-mounted (not :ro because pip install -e writes
+      # egg-info into the source dir). The world-api uses the SDK's
+      # ReflexEngine + prompt builders to drive `managed=true` heroes
+      # server-side. Live edits to bot-sdk source require a container
+      # restart (the install copies code into the .venv).
+      - ./bot-sdk-python:/sdk/bot-sdk-python
+      # cq local SQLite lives here so it persists across rebuilds.
+      - cq-data:/root/.local/share/cq
+    command:
+      - bash
+      - -c
+      - |
+        # Install the bot SDK so the managed runtime can use the same
+        # reflex/prompt code paths as remote bots. Editable install so
+        # `make dev` reflects changes after a restart.
+        echo "[managed] installing arena-bot SDK from /sdk/bot-sdk-python"
+        uv pip install --python /app/.venv/bin/python --quiet -e /sdk/bot-sdk-python \
+          && echo "[managed] arena-bot installed" \
+          || echo "[managed] install failed — managed heroes will not run"
+
+        # Optional: install cq-sdk from PyPI when CQ_ENABLED=1. If install
+        # fails (e.g. offline / package not yet released), the world falls
+        # back to SqlRetriever transparently.
+        if [ "${CQ_ENABLED:-0}" = "1" ]; then
+          echo "[cq] CQ_ENABLED=1 — installing cq-sdk from PyPI"
+          uv pip install --python /app/.venv/bin/python --quiet cq-sdk \
+            && echo "[cq] cq-sdk installed" \
+            || echo "[cq] install failed — using SqlRetriever fallback"
+        fi
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_WORLD_API_URL: ${PUBLIC_WORLD_API_URL:-http://localhost:47800}
+    ports:
+      - "${FRONTEND_PORT:-47900}:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      - world-api
+
+  llm-gateway:
+    build:
+      context: ./llm-gateway
+      dockerfile: Dockerfile
+    environment:
+      ARENA_SHARED_SECRET: ${ARENA_SHARED_SECRET:-dev-secret}
+      GATEWAY_DEFAULT_PROVIDER: ${GATEWAY_DEFAULT_PROVIDER:-stub}
+      CQ_BASE_URL: ${CQ_BASE_URL:-}
+      CQ_API_KEY: ${CQ_API_KEY:-}
+      ANY_LLM_BASE_URL: ${ANY_LLM_BASE_URL:-}
+      LLAMAFILE_BASE_URL: ${LLAMAFILE_BASE_URL:-http://host.docker.internal:47080}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${GATEWAY_PORT:-47801}:8001"
+    volumes:
+      - ./llm-gateway/app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+
+volumes:
+  postgres-data:
+  redis-data:
+  cq-data:

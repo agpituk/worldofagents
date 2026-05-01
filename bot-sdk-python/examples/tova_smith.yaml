@@ -1,0 +1,81 @@
+manifest_version: 1
+hero:
+  name: "Tova Forgemaster"
+  author: "@agpituk"
+  division: featherweight
+
+  bio: |
+    Daughter of a smelter-clan in the Iron Mountains. Came to Threshold for
+    the steady stone of a sanctuary forge and the steady gold of a guard who
+    needs blades. Doesn't trust LLMs of any size — does her work and goes home.
+
+  build:
+    str: 14
+    dex: 10
+    con: 16
+    int: 10
+    wis: 14
+    cha: 8
+    # 72 / 100 — the 28 spare points are deliberate; she'll never need more.
+
+  models:
+    cheap: { gateway: arena, model: qwen3-4b, host: local }
+  model: cheap
+
+  system: |
+    You are Tova. A craftswoman, not a hero.
+
+  # Pure economy loop — gather → craft → sell. Almost no LLM use; the model
+  # is only invoked if a hostile gets adjacent (combat is deterministic
+  # otherwise via attack_nearest_hostile).
+  reflexes:
+    - when: "hp <= 8"
+      then: { do: flee }
+
+    # Combat fallback if mobs get adjacent
+    - when: "enemy_in_range()"
+      then: { do: attack_nearest_hostile }
+    - when: "hostile_visible() and not enemy_in_range()"
+      then: { do: move_to_nearest_hostile }
+
+    # PHASE 1 — gather raw materials in the wilds
+    # Need 2× iron_ore + 1× oak_log per sword. Stack inventory with both.
+    - when: "zone == 'market_square' and not in_inventory('iron_ore') and not in_inventory('oak_log')"
+      then: { do: travel, zone: lantern_road }
+    - when: "zone == 'lantern_road' and pos_x == 5 and pos_y == 3"
+      then: { do: gather }
+    - when: "zone == 'lantern_road' and not in_inventory('oak_log')"
+      then: { do: move, target: [5, 3] }
+    - when: "zone == 'lantern_road' and in_inventory('oak_log')"
+      then: { do: travel, zone: hush_wood }
+    - when: "zone == 'hush_wood' and pos_x == 3 and pos_y == 3"
+      then: { do: gather }
+    - when: "zone == 'hush_wood' and not in_inventory('iron_ore')"
+      then: { do: move, target: [3, 3] }
+    # Once we have at least one of each, head back to forge to craft.
+    - when: "zone == 'hush_wood' and in_inventory('iron_ore') and in_inventory('oak_log')"
+      then: { do: travel, zone: lantern_road }
+    - when: "zone == 'lantern_road' and in_inventory('iron_ore') and in_inventory('oak_log')"
+      then: { do: travel, zone: market_square }
+
+    # PHASE 2 — craft at the forge (market_square @ 8,8)
+    - when: "zone == 'market_square' and in_inventory('iron_ore') and in_inventory('oak_log') and (pos_x != 7 or pos_y != 8)"
+      then: { do: move, target: [7, 8] }
+    - when: "zone == 'market_square' and pos_x == 7 and pos_y == 8 and in_inventory('iron_ore') and in_inventory('oak_log')"
+      then: { do: craft, recipe: iron_sword_recipe }
+
+    # PHASE 3 — sell sword to Ghada (watchmans_bastion)
+    - when: "zone == 'market_square' and in_inventory('iron_sword')"
+      then: { do: travel, zone: watchmans_bastion }
+    - when: "zone == 'watchmans_bastion' and in_inventory('iron_sword') and (pos_x != 4 or pos_y != 4) and not adjacent_to('ghada')"
+      then: { do: move_to_npc, slug: ghada }
+    - when: "zone == 'watchmans_bastion' and adjacent_to('ghada') and in_inventory('iron_sword')"
+      then: { do: sell, target: ghada, item: iron_sword, qty: 1 }
+    - when: "zone == 'watchmans_bastion' and not in_inventory('iron_sword')"
+      then: { do: travel, zone: market_square }
+
+  memory:
+    initial:
+      goal: "make swords. sell swords. survive."
+      grudges: []
+      gold: 0

@@ -1,0 +1,49 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+.turbo/
+
+# --- Editors / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Local-only ---
+.env
+.env.*
+!.env.example
+.claude/
+.arena-cache/
+*.log
+
+# --- Docker volume mounts (local data, not source) ---
+postgres-data/
+redis-data/
+minio-data/
+cq-data/
+
+# --- Misc ---
+*.tmp
+*.bak

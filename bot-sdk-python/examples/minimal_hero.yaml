@@ -1,0 +1,108 @@
+manifest_version: 1
+hero:
+  name: "Bromir the Stalwart"
+  author: "@agpituk"
+  division: featherweight
+
+  bio: |
+    Retired blacksmith from the Iron Mountains, drawn back to adventuring by
+    rumors of his brother's disappearance. Cautious in combat, generous in trade.
+
+  build:
+    str: 18
+    dex: 14
+    con: 18
+    int: 12
+    wis: 16
+    cha: 12
+
+  models:
+    cheap: { gateway: arena, model: qwen3-4b, host: local }
+
+  model: cheap
+
+  system: |
+    You are Bromir. Cautious in combat, generous in trade.
+
+  # Reflexes — linear, no loops. Combat reflexes are global (fire whenever
+  # there's a hostile, regardless of zone). Routing reflexes are linear by
+  # zone after the quest has been delivered.
+  reflexes:
+    # Survival — always first
+    - when: "hp <= 8"
+      then: { do: flee }
+
+    # PvP self-defense — non-sanctuaries only
+    - when: "any_hero_adjacent() and in_pvp_zone()"
+      then: { do: attack_nearest_hero }
+
+    # OPPORTUNISTIC LOOT — pick up and equip a weapon/armor on our tile
+    - when: "not weapon_equipped() and item_at_my_tile('weapon') is not None"
+      then: { do: pickup, slug: iron_sword }
+    - when: "not weapon_equipped() and 'iron_sword' in [i['slug'] for i in _perception.perception.get('inventory', [])]"
+      then: { do: equip, slug: iron_sword }
+    - when: "not armor_equipped() and item_at_my_tile('armor') is not None"
+      then: { do: pickup, slug: leather_jerkin }
+    - when: "not armor_equipped() and 'leather_jerkin' in [i['slug'] for i in _perception.perception.get('inventory', [])]"
+      then: { do: equip, slug: leather_jerkin }
+
+    # PHASE 1 — get to Marek at the Cracked Tankard
+    - when: "marek_state == 'fresh' and zone != 'cracked_tankard'"
+      then: { do: travel, zone: cracked_tankard }
+    - when: "marek_state == 'fresh' and visible('marek') and not adjacent_to('marek')"
+      then: { do: move_to_npc, slug: marek }
+    - when: "marek_state == 'fresh' and adjacent_to('marek')"
+      then: { do: invoke_llm }
+
+    # PHASE 2 — accept the quest
+    - when: "marek_state == 'asked' and adjacent_to('marek')"
+      then: { do: invoke_llm }
+
+    # PHASE 3 — deliver to Ghada at the Watchman's Bastion
+    - when: "marek_state == 'carrying' and zone == 'cracked_tankard'"
+      then: { do: travel, zone: market_square }
+    - when: "marek_state == 'carrying' and zone == 'market_square'"
+      then: { do: travel, zone: watchmans_bastion }
+    - when: "marek_state == 'carrying' and zone == 'watchmans_bastion' and visible('ghada') and not adjacent_to('ghada')"
+      then: { do: move_to_npc, slug: ghada }
+    - when: "marek_state == 'carrying' and zone == 'watchmans_bastion' and ghada_state == 'fresh' and adjacent_to('ghada')"
+      then: { do: invoke_llm }
+    - when: "marek_state == 'carrying' and zone == 'watchmans_bastion' and ghada_state == 'expecting' and adjacent_to('ghada')"
+      then: { do: give, target: ghada, item: mareks_sealed_package }
+
+    # GLOBAL — combat with mobs (any zone)
+    - when: "enemy_in_range()"
+      then: { do: attack_nearest_hostile }
+    - when: "hostile_visible() and not enemy_in_range()"
+      then: { do: move_to_nearest_hostile }
+
+    # PHASE 4 — after delivery, head out into the wilderness to hunt
+    # Linear path: bastion → market_square → lantern_road → hush_wood
+    - when: "marek_state == 'delivered' and zone == 'watchmans_bastion'"
+      then: { do: travel, zone: market_square }
+    - when: "marek_state == 'delivered' and zone == 'market_square'"
+      then: { do: travel, zone: lantern_road }
+    - when: "marek_state == 'delivered' and zone == 'lantern_road'"
+      then: { do: travel, zone: hush_wood }
+
+  # Composites — multi-step abilities the reflex layer can invoke. Each named
+  # ability becomes a queue: the runner dispatches one primitive per tick
+  # until empty, then resumes the reflex layer.
+  abilities:
+    bank_run:
+      steps:
+        - { do: travel, zone: market_square }
+        - { do: travel, zone: watchmans_bastion }
+        - { do: move_to_npc, slug: iren_the_banker }
+
+  memory:
+    initial:
+      goal: |
+        Deliver Marek's sealed package from the Cracked Tankard to Captain
+        Ghada at the Watchman's Bastion. Then head into the wilds and hunt.
+        If a hostile is at melee range, ATTACK don't move.
+      grudges: []
+
+  budget:
+    tokens_per_tick: 500
+    cost_per_day_usd: 0.50
