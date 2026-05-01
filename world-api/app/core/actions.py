@@ -77,8 +77,17 @@ def _journal_milestone(
     return entry
 
 
+JOURNAL_WRITE_PER_TICK_LIMIT = 4
+
+
 def _resolve_journal_write(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
-    """The hero records their own thought into their journal."""
+    """The hero records their own thought into their journal.
+
+    P2-4: capped at JOURNAL_WRITE_PER_TICK_LIMIT player entries per tick.
+    Without this a misbehaving manifest can spam the table forever; the
+    archival job belongs in a separate change but the rate limit closes
+    the spam vector immediately.
+    """
     text = (action.get("text") or "").strip()
     if not text:
         return ResolutionResult(False, {"verb": "journal_write", "error": "empty text"})
@@ -88,6 +97,26 @@ def _resolve_journal_write(db: Session, hero: Hero, action: dict[str, Any]) -> R
         return ResolutionResult(False, {"verb": "journal_write", "error": "tags must be a list"})
     tags = [str(t)[:32] for t in tags][:8]
     tick_id = _current_tick(db)
+
+    db.flush()  # make sure earlier writes within this tick are visible to count
+    existing_this_tick = db.scalar(
+        select(func.count(JournalEntry.id)).where(
+            JournalEntry.hero_id == hero.id,
+            JournalEntry.tick_id == tick_id,
+            JournalEntry.kind == "player",
+        )
+    ) or 0
+    if existing_this_tick >= JOURNAL_WRITE_PER_TICK_LIMIT:
+        return ResolutionResult(
+            False,
+            {
+                "verb": "journal_write",
+                "error": f"rate limit: max {JOURNAL_WRITE_PER_TICK_LIMIT} player entries per tick",
+                "reason": "journal_rate_limit",
+                "limit": JOURNAL_WRITE_PER_TICK_LIMIT,
+            },
+        )
+
     db.add(JournalEntry(hero_id=hero.id, tick_id=tick_id, kind="player", text=text, tags=tags))
     # Push to the retriever (no-op for SqlRetriever; cq.propose for CqRetriever).
     from app.core.retriever import get_retriever
