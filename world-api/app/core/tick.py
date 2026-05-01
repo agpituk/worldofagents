@@ -160,11 +160,12 @@ class TickEngine:
                     )
                 )
 
-                # Surface "the model picked a verb we don't know" as a
-                # distinct parse_failure row in the event stream — same
-                # surface as bot-side JSON parse failures so spectator
-                # tooling can render both with one renderer.
-                if not result.ok and result.outcome.get("reason") == "unknown_verb":
+                # Surface dispatcher-level validation failures
+                # (unknown verb, bad arg shape) as parse_failure rows so
+                # the spectator UI renders all "wasted ticks" with one
+                # path, regardless of where in the stack they fail.
+                _server_side_failures = {"unknown_verb", "bad_action_shape"}
+                if not result.ok and result.outcome.get("reason") in _server_side_failures:
                     db.add(
                         Event(
                             tick_id=tick_id,
@@ -172,7 +173,8 @@ class TickEngine:
                             zone=hero.zone,
                             kind="parse_failure",
                             payload={
-                                "reason": "unknown_verb",
+                                "reason": result.outcome["reason"],
+                                "error": result.outcome.get("error"),
                                 "raw_output": str(action)[:500],
                                 "fallback_action": {"do": "wait"},
                             },

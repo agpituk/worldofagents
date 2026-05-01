@@ -1481,6 +1481,66 @@ def _visible_items_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[st
 
 
 # ---------------------------------------------------------------------------
+# Action shape validation (P2-5)
+# ---------------------------------------------------------------------------
+
+# Per-verb required field types. Suffix "?" = optional. Verbs absent from
+# this map (wait, look, defend, flee, gather, journal_write, …) have no
+# required fields. Unknown verbs are caught downstream with reason=
+# unknown_verb, which is the right place for that mode.
+_VERB_SCHEMAS: dict[str, dict[str, type | tuple[type, ...]]] = {
+    "attack": {"target": str},
+    "attack_hero": {"target": str},
+    "move": {"target": (list, tuple)},
+    "travel": {"zone": str},
+    "say": {"message": str},
+    "give": {"target": str, "item": str},
+    "examine": {"target": str},
+    "pickup": {"slug": str},
+    "drop": {"slug": str},
+    "equip": {"slug": str},
+    "unequip": {"slot": str},
+    "craft": {"recipe": str},
+    "buy": {"target": str, "item": str, "qty?": int},
+    "sell": {"target": str, "item": str, "qty?": int},
+    "cast": {"spell": str, "target?": str},
+    "tame": {"target": str},
+    "accept_quest": {"target": str},
+    "store": {"slug": str, "qty?": int},
+    "withdraw": {"slug": str, "qty?": int},
+    "buy_house": {"slug": str},
+    "accept_offer": {"offer_id": str},
+    "reject_offer": {"offer_id": str},
+}
+
+
+def _validate_action_shape(verb: str, action: dict[str, Any]) -> str | None:
+    """Return None if the action's fields match the verb's schema,
+    or a human-readable error string. Errors are short and structured
+    enough to be useful in the spectator UI."""
+    schema = _VERB_SCHEMAS.get(verb)
+    if schema is None:
+        return None  # unknown or schema-less verb — not our concern here
+    for key, expected_type in schema.items():
+        optional = key.endswith("?")
+        field = key.rstrip("?")
+        if field not in action or action[field] is None:
+            if not optional:
+                return f"missing required field '{field}'"
+            continue
+        value = action[field]
+        if not isinstance(value, expected_type):
+            got = type(value).__name__
+            want = (
+                expected_type.__name__
+                if isinstance(expected_type, type)
+                else "/".join(t.__name__ for t in expected_type)
+            )
+            return f"field '{field}' wants {want}, got {got}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Resolve
 # ---------------------------------------------------------------------------
 
@@ -1496,6 +1556,18 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
         return ResolutionResult(False, {"error": "action must be a dict", "verb": None})
 
     verb = action.get("do")
+    # P2-5: shape-check the action's required fields before dispatching.
+    # Catches the FIX_PLAN done-when case ({"do":"attack","target":42})
+    # with a structured reason="bad_action_shape" so it lands in the
+    # parse_failure stream rather than as a downstream "no such NPC".
+    if isinstance(verb, str):
+        shape_err = _validate_action_shape(verb, action)
+        if shape_err is not None:
+            return ResolutionResult(False, {
+                "verb": verb,
+                "error": shape_err,
+                "reason": "bad_action_shape",
+            })
 
     if verb == "wait":
         return ResolutionResult(True, {"verb": "wait"})
