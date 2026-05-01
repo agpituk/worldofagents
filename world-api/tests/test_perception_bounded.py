@@ -135,6 +135,54 @@ def test_perception_is_deterministic(db: Session):
     assert a["visible_npcs"] == b["visible_npcs"]
 
 
+def test_high_wis_sees_more_journal_entries(db: Session):
+    """FIX_PLAN P0-1's second done-when: a hero with WIS 25 sees
+    strictly more journal entries in perception_for than one with WIS 5.
+
+    Uses a small journal (8 entries, short text) so the P0-2-step-3
+    token ceiling doesn't trim either hero's slice — the test pins
+    journal_recent_limit's WIS-monotonic behaviour through the actual
+    perception pipeline, not just the formula."""
+    from app.core.models import JournalEntry
+
+    fool = _seed_hero(db, wis=5, name="fool-j")
+    sage = _seed_hero(db, wis=25, name="sage-j")
+
+    for hero in (fool, sage):
+        for i in range(8):
+            db.add(JournalEntry(
+                hero_id=hero.id, tick_id=i, kind="player",
+                text=f"e{i}", tags=[],
+            ))
+    db.flush()
+
+    fool_p = perception_for(db, fool)
+    sage_p = perception_for(db, sage)
+    # WIS 5 → recent_limit 9 (caps at the 8 entries available)
+    # WIS 25 → recent_limit 19 (caps at the 8 entries available)
+    # Both are bounded by available content here, so the relevant
+    # comparison is journal_relevant_k (3 vs 8).
+    # No recall_tags are set so journal_relevant returns []; we have
+    # to set tags to drive the relevance retriever to populate.
+    # Simpler check: assert WIS 25 hero's journal_recent slice contains
+    # ALL 8 entries while we still don't break with bigger floods.
+    assert len(sage_p["journal_recent"]) >= len(fool_p["journal_recent"])
+    # Pump in more entries so the WIS gap becomes visible.
+    for hero in (fool, sage):
+        for i in range(8, 30):
+            db.add(JournalEntry(
+                hero_id=hero.id, tick_id=i, kind="player",
+                text=f"e{i}", tags=[],
+            ))
+    db.flush()
+    fool_p2 = perception_for(db, fool)
+    sage_p2 = perception_for(db, sage)
+    assert len(sage_p2["journal_recent"]) > len(fool_p2["journal_recent"]), (
+        f"sage saw {len(sage_p2['journal_recent'])} journal entries, "
+        f"fool saw {len(fool_p2['journal_recent'])}"
+    )
+
+
 def test_npcs_truncated_by_relevance_not_random(db: Session):
     """Hostile NPCs must beat peaceful ones for a slot in the budget —
     a low-WIS hero in a flood of mixed hostility still sees the threats."""

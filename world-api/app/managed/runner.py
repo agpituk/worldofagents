@@ -142,8 +142,45 @@ class ManagedHeroTask:
             gateway_permission_token=msg.get("gateway_permission_token"),
         )
 
-        # If a composite is in flight, drain its next step.
+        # If a composite is in flight, re-evaluate reflexes against fresh
+        # perception BEFORE draining the next primitive step. This is the
+        # P2-2 fix: an enemy that appears on step 2 of a 5-step gather
+        # plan should interrupt the gather, not get gathered through.
+        # Reflexes that produce the SAME composite the hero is currently
+        # running don't trigger re-entry — that would loop forever.
         if self._composite_queue:
+            interrupt_action, interrupt_debug = self._reflexes.evaluate_with_debug(perception)
+            if interrupt_action is not None and interrupt_action.get("do") not in (
+                self._composite_name,  # don't re-enter the same composite
+                None,
+            ):
+                # The interrupt is genuinely different from the in-flight
+                # composite. Abandon the queue, log a composite_interrupted
+                # marker so the spectator UI can render the break, and
+                # treat the interrupt as a fresh decision (which will go
+                # through the composite-expansion / invoke_llm paths
+                # below on its own).
+                interrupted_name = self._composite_name
+                remaining = len(self._composite_queue)
+                self._composite_queue = []
+                self._composite_name = None
+                debug = {
+                    "via": "composite_interrupted",
+                    "interrupted_composite": interrupted_name,
+                    "remaining_was": remaining,
+                    "by_reflex_index": (interrupt_debug or {}).get("reflex_index"),
+                    "when": (interrupt_debug or {}).get("when"),
+                }
+                # Recurse-style: re-enter the decision path with the queue
+                # cleared. _decide_after_reflex handles composite expansion
+                # / invoke_llm uniformly with the no-composite branch.
+                action, _ = await self._decide_after_reflex(
+                    perception, interrupt_action, interrupt_debug
+                )
+                # Annotate so the spectator can see "broke off X for Y".
+                action_debug = {**(_ or {}), "interrupt": debug}
+                return action, action_debug, "reflex" if action.get("do") != "invoke_llm" else "llm"
+
             step = self._composite_queue.pop(0)
             debug = {"via": "composite", "composite": self._composite_name,
                      "remaining": len(self._composite_queue)}
@@ -154,7 +191,22 @@ class ManagedHeroTask:
         action, debug = self._reflexes.evaluate_with_debug(perception)
         if action is None:
             return {"do": "wait"}, {"reflex_index": -1, "note": "no reflex matched"}, "reflex"
+        result_action, result_debug = await self._decide_after_reflex(
+            perception, action, debug
+        )
+        kind = "llm" if result_action.get("do") == "invoke_llm" else "reflex"
+        return result_action, result_debug, kind
 
+    async def _decide_after_reflex(
+        self,
+        perception: "Perception",  # type: ignore[name-defined]
+        action: dict[str, Any],
+        debug: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Common tail of _decide: given a reflex-selected action, expand
+        composites, dispatch invoke_llm, or return the primitive action.
+        Pulled out so the composite-interrupt path (P2-2) can share the
+        same expansion logic as the cold-start path."""
         # Composite expansion.
         if action.get("do") in self._abilities:
             name = action["do"]
@@ -167,16 +219,16 @@ class ManagedHeroTask:
                            "remaining": len(self._composite_queue),
                            "reflex_index": (debug or {}).get("reflex_index"),
                            "when": (debug or {}).get("when")}
-                return dict(first), d_debug, "reflex"
+                return dict(first), d_debug
 
         if action.get("do") == "invoke_llm":
             llm_action = await self._call_llm(perception)
             d_debug = {"via": "invoke_llm",
                        "reflex_index": (debug or {}).get("reflex_index"),
                        "when": (debug or {}).get("when")}
-            return llm_action, d_debug, "llm"
+            return llm_action, d_debug
 
-        return action, debug, "reflex"
+        return action, debug
 
     # ------------------------------------------------------------------
     # Gateway call
