@@ -14,6 +14,7 @@ from app.core.hero_budgets import (
     look_radius,
     mana_regen_per_tick,
     max_tokens_per_tick,
+    perception_budget,
 )
 
 
@@ -93,3 +94,24 @@ def test_wis_does_not_leak_into_int_budgets():
     high_wis = _StatBag(int_=10, wis=25)
     assert mana_regen_per_tick(low_wis) == mana_regen_per_tick(high_wis)
     assert max_tokens_per_tick(low_wis) == max_tokens_per_tick(high_wis)
+
+
+# --- perception caps (P0-2) ------------------------------------------------
+
+
+def test_perception_budget_strictly_monotonic_in_wis():
+    """Every cap rises with WIS — a sage genuinely sees more than a fool."""
+    dim = perception_budget(_StatBag(wis=5))
+    avg = perception_budget(_StatBag(wis=10))
+    sage = perception_budget(_StatBag(wis=25))
+    assert dim.max_inventory < avg.max_inventory < sage.max_inventory
+    assert dim.max_visible_npcs < avg.max_visible_npcs < sage.max_visible_npcs
+    assert dim.max_visible_heroes < avg.max_visible_heroes < sage.max_visible_heroes
+    assert dim.max_memory_tags < avg.max_memory_tags < sage.max_memory_tags
+
+
+def test_perception_budget_int_does_not_leak():
+    """INT must NOT change perception caps — that's WIS's domain."""
+    low = perception_budget(_StatBag(int_=5, wis=10))
+    high = perception_budget(_StatBag(int_=25, wis=10))
+    assert low == high

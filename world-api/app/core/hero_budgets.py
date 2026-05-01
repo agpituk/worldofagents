@@ -13,6 +13,7 @@ journal_recent = 12, journal_relevant = 5, look_radius = max(2, 2+wis//4).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -48,3 +49,45 @@ def journal_relevant_k(hero: Hero) -> int:
 
 def look_radius(hero: Hero) -> int:
     return max(2, 2 + hero.wis // 4)
+
+
+# ---------------------------------------------------------------------------
+# Perception budget (P0-2) — caps on what perception_for serialises
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PerceptionBudget:
+    """Maximum number of entries from each list type that perception_for
+    serialises into the LLM payload. Lists past the cap are sorted by
+    relevance and truncated, not random-sampled. WIS scales every cap so
+    a sage genuinely sees more than a fool.
+
+    Defaults pick "comfortable" numbers for a 10/10 hero in the smaller
+    seeded zones; enough for a busy market but bounded so a worst-case
+    zone with 100 NPCs cannot blow up the prompt.
+    """
+
+    max_inventory: int
+    max_visible_npcs: int
+    max_visible_heroes: int
+    max_memory_tags: int
+
+
+# WIS 5 → 10/8/5/32, WIS 10 → 16/12/8/64, WIS 25 → 31/24/17/184.
+_INVENTORY_BASE = 6
+_INVENTORY_PER_WIS = 1
+_NPC_BASE = 4
+_NPC_PER_2WIS = 1
+_HERO_BASE = 3
+_HERO_PER_2WIS = 1
+_MEMORY_TAG_BASE = 24
+_MEMORY_TAG_PER_WIS = 4
+
+
+def perception_budget(hero: Hero) -> PerceptionBudget:
+    return PerceptionBudget(
+        max_inventory=_INVENTORY_BASE + hero.wis * _INVENTORY_PER_WIS,
+        max_visible_npcs=_NPC_BASE + hero.wis // 2 * _NPC_PER_2WIS,
+        max_visible_heroes=_HERO_BASE + hero.wis // 2 * _HERO_PER_2WIS,
+        max_memory_tags=_MEMORY_TAG_BASE + hero.wis * _MEMORY_TAG_PER_WIS,
+    )

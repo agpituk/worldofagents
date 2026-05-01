@@ -15,7 +15,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.dice import d20, roll
-from app.core.hero_budgets import journal_recent_limit, journal_relevant_k, look_radius
+from app.core.hero_budgets import (
+    journal_recent_limit,
+    journal_relevant_k,
+    look_radius,
+    perception_budget,
+)
 from app.core.models import Bounty, Building, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
 
 # Per-tick transient state for `defend` — heroes who declared defend get +5 AC for
@@ -1374,34 +1379,63 @@ def _move_speed(hero: Hero) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _visible_heroes_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[str, Any]]:
+def _visible_heroes_in_zone(
+    db: Session, hero: Hero, radius: int, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     others = (
         db.query(Hero)
         .filter(Hero.zone == hero.zone, Hero.id != hero.id, Hero.status == "alive")
         .all()
     )
-    out: list[dict[str, Any]] = []
-    for o in others:
-        if abs(o.pos_x - hero.pos_x) + abs(o.pos_y - hero.pos_y) <= radius:
-            out.append({"kind": "hero", "id": str(o.id), "name": o.name, "pos": [o.pos_x, o.pos_y], "hp": o.hp})
-    return out
+    nearby = [
+        o for o in others
+        if abs(o.pos_x - hero.pos_x) + abs(o.pos_y - hero.pos_y) <= radius
+    ]
+    # Closest first; tie-break by hero id so the order is deterministic.
+    nearby.sort(key=lambda o: (
+        abs(o.pos_x - hero.pos_x) + abs(o.pos_y - hero.pos_y),
+        str(o.id),
+    ))
+    if limit is not None:
+        nearby = nearby[:limit]
+    return [
+        {"kind": "hero", "id": str(o.id), "name": o.name, "pos": [o.pos_x, o.pos_y], "hp": o.hp}
+        for o in nearby
+    ]
 
 
-def _visible_npcs_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[str, Any]]:
+# Hostile NPCs sort first so a low-WIS hero in danger still sees the threat
+# rather than wasting their visibility budget on the innkeeper.
+_HOSTILITY_PRIORITY = {"hostile": 0, "tamed": 1, "peaceful": 2}
+
+
+def _visible_npcs_in_zone(
+    db: Session, hero: Hero, radius: int, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     npcs = list(db.scalars(select(NPC).where(NPC.zone == hero.zone, NPC.alive.is_(True))))
-    out: list[dict[str, Any]] = []
-    for n in npcs:
-        if abs(n.pos_x - hero.pos_x) + abs(n.pos_y - hero.pos_y) <= radius:
-            out.append({
-                "kind": "npc",
-                "slug": n.slug,
-                "name": n.name,
-                "pos": [n.pos_x, n.pos_y],
-                "hostility": n.hostility,
-                "hp": n.hp_current,
-                "hp_max": n.hp_max,
-            })
-    return out
+    nearby = [
+        n for n in npcs
+        if abs(n.pos_x - hero.pos_x) + abs(n.pos_y - hero.pos_y) <= radius
+    ]
+    nearby.sort(key=lambda n: (
+        _HOSTILITY_PRIORITY.get(n.hostility, 3),
+        abs(n.pos_x - hero.pos_x) + abs(n.pos_y - hero.pos_y),
+        n.slug,
+    ))
+    if limit is not None:
+        nearby = nearby[:limit]
+    return [
+        {
+            "kind": "npc",
+            "slug": n.slug,
+            "name": n.name,
+            "pos": [n.pos_x, n.pos_y],
+            "hostility": n.hostility,
+            "hp": n.hp_current,
+            "hp_max": n.hp_max,
+        }
+        for n in nearby
+    ]
 
 
 def _visible_items_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[str, Any]]:
@@ -2154,10 +2188,12 @@ def _journal_recent(db: Session, hero: Hero, n: int) -> list[dict[str, Any]]:
     return out
 
 
-def _memory_tags(db: Session, hero: Hero) -> list[str]:
-    """The set of all unique tags the hero has ever earned in their journal —
-    fed to the bot's reflex evaluator as `memory_tags` so deterministic rules
-    can branch on long-term memory without burning a token. Capped at 200."""
+def _memory_tags(db: Session, hero: Hero, limit: int) -> list[str]:
+    """The set of unique tags the hero has earned in their journal — fed to
+    the bot's reflex evaluator as `memory_tags` so deterministic rules can
+    branch on long-term memory without burning a token. Capped at `limit`,
+    biased toward tags from the most recent entries so the working set is
+    relevant rather than archaeological."""
     rows = list(
         db.scalars(
             select(JournalEntry.tags)
@@ -2170,17 +2206,35 @@ def _memory_tags(db: Session, hero: Hero) -> list[str]:
     for taglist in rows:
         for t in (taglist or []):
             tags.add(str(t))
-            if len(tags) >= 200:
+            if len(tags) >= limit:
                 break
-        if len(tags) >= 200:
+        if len(tags) >= limit:
             break
     return sorted(tags)
 
 
+def _ranked_inventory(hero: Hero, items: list[Item], limit: int) -> list[Item]:
+    """Sort inventory: equipped slots first (so a wizard's wand is never
+    truncated off), then most-recently-acquired (id desc as a proxy until
+    last_used_tick exists). Truncate at `limit`."""
+    equipped_slugs = set((hero.equipped or {}).values()) if isinstance(hero.equipped, dict) else set()
+    items_sorted = sorted(
+        items,
+        key=lambda i: (
+            0 if i.slug in equipped_slugs else 1,
+            -((i.id.int) if hasattr(i.id, "int") else hash(str(i.id))),
+            i.slug,
+        ),
+    )
+    return items_sorted[:limit]
+
+
 def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
     radius = look_radius(hero)
+    budget = perception_budget(hero)
     zone = db.get(Zone, hero.zone)
-    inventory = list(db.scalars(select(Item).where(Item.owner_hero_id == hero.id)))
+    inventory_all = list(db.scalars(select(Item).where(Item.owner_hero_id == hero.id)))
+    inventory = _ranked_inventory(hero, inventory_all, budget.max_inventory)
     return {
         "zone": {
             "slug": hero.zone,
@@ -2191,8 +2245,8 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         },
         "self_pos": [hero.pos_x, hero.pos_y],
         "visible_radius": radius,
-        "visible_heroes": _visible_heroes_in_zone(db, hero, radius),
-        "visible_npcs": _visible_npcs_in_zone(db, hero, radius),
+        "visible_heroes": _visible_heroes_in_zone(db, hero, radius, limit=budget.max_visible_heroes),
+        "visible_npcs": _visible_npcs_in_zone(db, hero, radius, limit=budget.max_visible_npcs),
         "visible_items": _visible_items_in_zone(db, hero, radius),
         "inventory": [
             {
@@ -2205,5 +2259,5 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         "memory": hero.memory or {},
         "journal_recent": _journal_recent(db, hero, journal_recent_limit(hero)),
         "journal_relevant": _journal_relevant(db, hero, journal_relevant_k(hero)),
-        "memory_tags": _memory_tags(db, hero),
+        "memory_tags": _memory_tags(db, hero, budget.max_memory_tags),
     }
