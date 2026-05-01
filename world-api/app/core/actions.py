@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.dice import d20, roll
+from app.core.hero_budgets import journal_recent_limit, journal_relevant_k, look_radius
 from app.core.models import Bounty, Building, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
 
 # Per-tick transient state for `defend` — heroes who declared defend get +5 AC for
@@ -1364,10 +1365,6 @@ class ResolutionResult:
 # ---------------------------------------------------------------------------
 
 
-def _look_radius(hero: Hero) -> int:
-    return max(2, 2 + hero.wis // 4)
-
-
 def _move_speed(hero: Hero) -> int:
     return max(1, 1 + hero.dex // 8)
 
@@ -1445,7 +1442,7 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
         return ResolutionResult(True, {"verb": "wait"})
 
     if verb == "look":
-        radius = _look_radius(hero)
+        radius = look_radius(hero)
         return ResolutionResult(
             True,
             {
@@ -1948,7 +1945,7 @@ def _resolve_examine(db: Session, hero: Hero, action: dict[str, Any]) -> Resolut
     if not target:
         return ResolutionResult(False, {"verb": "examine", "error": "missing target"})
 
-    radius = _look_radius(hero)
+    radius = look_radius(hero)
     npc = db.get(NPC, str(target)) if isinstance(target, str) else None
     if npc and npc.zone == hero.zone and abs(npc.pos_x - hero.pos_x) + abs(npc.pos_y - hero.pos_y) <= radius:
         return ResolutionResult(
@@ -2116,7 +2113,7 @@ def _visible_resource_nodes(db: Session, hero: Hero, radius: int) -> list[dict[s
     return out
 
 
-def _journal_relevant(db: Session, hero: Hero, n: int = 5) -> list[dict[str, Any]]:
+def _journal_relevant(db: Session, hero: Hero, n: int) -> list[dict[str, Any]]:
     """Top-K journal entries scored by the active retriever, biased by the
     hero's manifest-declared `recall_tags`. This is the "memories you carry"
     slice — durable across distance and time, not just the last few ticks."""
@@ -2142,7 +2139,7 @@ def _journal_relevant(db: Session, hero: Hero, n: int = 5) -> list[dict[str, Any
     return out
 
 
-def _journal_recent(db: Session, hero: Hero, n: int = 12) -> list[dict[str, Any]]:
+def _journal_recent(db: Session, hero: Hero, n: int) -> list[dict[str, Any]]:
     """Recency-weighted slice for the LLM context."""
     rows = list(
         db.scalars(
@@ -2181,7 +2178,7 @@ def _memory_tags(db: Session, hero: Hero) -> list[str]:
 
 
 def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
-    radius = _look_radius(hero)
+    radius = look_radius(hero)
     zone = db.get(Zone, hero.zone)
     inventory = list(db.scalars(select(Item).where(Item.owner_hero_id == hero.id)))
     return {
@@ -2206,7 +2203,7 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         ],
         "visible_resources": _visible_resource_nodes(db, hero, radius),
         "memory": hero.memory or {},
-        "journal_recent": _journal_recent(db, hero),
-        "journal_relevant": _journal_relevant(db, hero),
+        "journal_recent": _journal_recent(db, hero, journal_recent_limit(hero)),
+        "journal_relevant": _journal_relevant(db, hero, journal_relevant_k(hero)),
         "memory_tags": _memory_tags(db, hero),
     }

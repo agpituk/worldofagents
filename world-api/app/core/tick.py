@@ -22,6 +22,7 @@ from app.core.actions import defending_this_tick, perception_for, resolve
 from app.core.combat import run_mob_phase
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.hero_budgets import mana_regen_per_tick
 from app.core.models import NPC, Event, Hero, Item, Tick
 from app.domains.npc.behaviors import apply_effects, react_to_receive, react_to_say
 
@@ -109,10 +110,10 @@ class TickEngine:
         with SessionLocal() as db:
             db.add(Tick(notes=f"tick #{tick_id}"))
 
-            # Mana regen — 1 per tick up to mana_max for every alive hero.
+            # Mana regen — INT-scaled per tick up to mana_max for every alive hero.
             for h in db.scalars(select(Hero).where(Hero.status == "alive")):
                 if h.mana_current < h.mana_max:
-                    h.mana_current += 1
+                    h.mana_current = min(h.mana_max, h.mana_current + mana_regen_per_tick(h))
 
             # Faction invasions: every 240 ticks the Embered raise their dead.
             from app.domains.npc.seed import respawn_invasion_mobs
