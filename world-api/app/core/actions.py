@@ -412,26 +412,45 @@ def _resolve_offer(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
 
 def _resolve_accept_offer(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
     """Accept a pending offer addressed to this hero. Adjacency required at
-    accept time too. Resolves instantly: both sides exchange items + gold."""
+    accept time too. Resolves instantly: both sides exchange items + gold.
+
+    P1-3: lock the offer row + both hero rows for the duration of the
+    handler. On Postgres this serialises concurrent accepts of the same
+    offer; on SQLite it's a no-op (writes already serialise) but the
+    re-check after the lock guards against logic-level TOCTOU regardless.
+    """
     offer_id = action.get("offer_id")
     if not offer_id:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "missing offer_id"})
     try:
-        offer = db.get(TradeOffer, uuid.UUID(str(offer_id)))
+        offer_uuid = uuid.UUID(str(offer_id))
     except ValueError:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "bad offer_id"})
+
+    offer = db.scalar(
+        select(TradeOffer).where(TradeOffer.id == offer_uuid).with_for_update()
+    )
     if offer is None:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "offer not found"})
     if offer.to_hero_id != hero.id:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "not the addressee"})
     if offer.status != "pending":
+        # Re-check inside the lock — by the time we got the row the offer
+        # may already have been accepted, rejected, or expired by another
+        # transaction. Without this check, P1-3's ghost-item duplication
+        # would slip through on Postgres.
         return ResolutionResult(False, {"verb": "accept_offer", "error": f"offer is {offer.status}"})
     current = _current_tick(db)
     if offer.expires_at_tick and current > offer.expires_at_tick:
         offer.status = "expired"
         return ResolutionResult(False, {"verb": "accept_offer", "error": "offer expired"})
 
-    other = db.get(Hero, offer.from_hero_id)
+    # Lock both hero rows so concurrent gold/inventory writes can't
+    # invalidate the balance checks below before we apply the transfer.
+    other = db.scalar(
+        select(Hero).where(Hero.id == offer.from_hero_id).with_for_update()
+    )
+    db.scalar(select(Hero).where(Hero.id == hero.id).with_for_update())
     if other is None or other.zone != hero.zone:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "counterparty not in zone"})
     if abs(other.pos_x - hero.pos_x) + abs(other.pos_y - hero.pos_y) > 1:
@@ -2017,6 +2036,9 @@ def _resolve_examine(db: Session, hero: Hero, action: dict[str, Any]) -> Resolut
 
 def _resolve_pickup(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
     target_slug = action.get("slug")
+    # P1-3: lock candidate ground items so two heroes hitting the same
+    # tile in the same tick can't both grab the same stack. Postgres
+    # serialises here; SQLite is single-writer anyway.
     items_here = list(
         db.scalars(
             select(Item).where(
@@ -2024,13 +2046,17 @@ def _resolve_pickup(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
                 Item.pos_x == hero.pos_x,
                 Item.pos_y == hero.pos_y,
                 Item.owner_hero_id.is_(None),
-            )
+            ).with_for_update()
         )
     )
     if not items_here:
         return ResolutionResult(False, {"verb": "pickup", "error": "no items at this tile"})
 
     ground = next((i for i in items_here if i.slug == target_slug), items_here[0])
+    # Re-check ownership inside the lock — by the time we got here the
+    # item could have been claimed by another transaction.
+    if ground.owner_hero_id is not None:
+        return ResolutionResult(False, {"verb": "pickup", "error": "item already taken"})
     qty = int(ground.quantity or 1)
 
     # Merge into existing stack if any; otherwise transfer ownership.
