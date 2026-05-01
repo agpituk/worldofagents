@@ -1467,6 +1467,12 @@ def _visible_items_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[st
 
 
 def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    # P1-4: dead heroes cannot act. The tick loop already filters alive
+    # heroes when scheduling, but managed bots can race a death write
+    # over WebSocket — without this guard, a corpse mutates the world.
+    if hero.status != "alive":
+        return ResolutionResult(False, {"error": "hero is dead", "reason": "dead", "verb": None})
+
     if not isinstance(action, dict):
         return ResolutionResult(False, {"error": "action must be a dict", "verb": None})
 
