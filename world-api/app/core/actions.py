@@ -20,6 +20,7 @@ from app.core.hero_budgets import (
     journal_relevant_k,
     look_radius,
     perception_budget,
+    perception_token_ceiling,
 )
 from app.core.models import Bounty, Building, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
 
@@ -2365,13 +2366,58 @@ def _ranked_inventory(hero: Hero, items: list[Item], limit: int) -> list[Item]:
     return items_sorted[:limit]
 
 
+# Trim order when perception still exceeds the token ceiling after
+# WIS caps: drop from the lists that hurt comprehension least first.
+# Visible NPCs are last because they drive combat decisions — losing
+# the hostile mob standing on the hero's tile means losing the tick.
+# Inventory drops before NPCs because "what's around me right now"
+# matters more than "what I'm carrying" for the next-action choice.
+_TRIM_PRIORITY: tuple[str, ...] = (
+    "memory_tags",
+    "journal_relevant",
+    "journal_recent",
+    "visible_heroes",
+    "inventory",
+    "visible_npcs",
+)
+
+
+def _estimate_tokens(payload: dict[str, Any]) -> int:
+    """Cheap token estimator: ~4 chars per token. Matches the gateway's
+    StubProvider's accounting so on-server estimates stay in the same
+    units as gateway-side billing."""
+    import json as _json
+    return len(_json.dumps(payload, separators=(",", ":"), default=str)) // 4
+
+
+def _trim_to_token_ceiling(payload: dict[str, Any], ceiling: int) -> dict[str, Any]:
+    """Drop tail entries in strict priority order: drain memory_tags
+    fully before touching journal_relevant, drain journal_relevant
+    fully before journal_recent, and so on. Visible_npcs is last and
+    only loses entries when everything cheaper is already empty."""
+    if _estimate_tokens(payload) <= ceiling:
+        return payload
+    for key in _TRIM_PRIORITY:
+        value = payload.get(key)
+        if not (isinstance(value, list) and value):
+            continue
+        # Drop tail entries from THIS list until either it's empty or
+        # the payload fits. Relevance was already used to sort, so
+        # [-1] is always the safest one to lose.
+        while payload[key] and _estimate_tokens(payload) > ceiling:
+            payload[key] = payload[key][:-1]
+        if _estimate_tokens(payload) <= ceiling:
+            return payload
+    return payload
+
+
 def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
     radius = look_radius(hero)
     budget = perception_budget(hero)
     zone = db.get(Zone, hero.zone)
     inventory_all = list(db.scalars(select(Item).where(Item.owner_hero_id == hero.id)))
     inventory = _ranked_inventory(hero, inventory_all, budget.max_inventory)
-    return {
+    payload = {
         "zone": {
             "slug": hero.zone,
             "name": zone.name if zone else hero.zone,
@@ -2397,3 +2443,13 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         "journal_relevant": _journal_relevant(db, hero, journal_relevant_k(hero)),
         "memory_tags": _memory_tags(db, hero, budget.max_memory_tags),
     }
+    # P0-2 step 3: estimate the perception's token cost. If past the
+    # INT-derived ceiling (perception_token_ceiling = 50% of the hero's
+    # max_tokens budget), trim further from the tail of the trim-priority
+    # lists. Estimate is recorded into the payload so spectators can see
+    # how close to the budget the prompt got.
+    ceiling = perception_token_ceiling(hero)
+    payload = _trim_to_token_ceiling(payload, ceiling)
+    payload["_perception_tokens_estimated"] = _estimate_tokens(payload)
+    payload["_perception_tokens_ceiling"] = ceiling
+    return payload

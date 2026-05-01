@@ -91,3 +91,16 @@ def perception_budget(hero: Hero) -> PerceptionBudget:
         max_visible_heroes=_HERO_BASE + hero.wis // 2 * _HERO_PER_2WIS,
         max_memory_tags=_MEMORY_TAG_BASE + hero.wis * _MEMORY_TAG_PER_WIS,
     )
+
+
+# Fraction of max_tokens_per_tick the perception payload alone is allowed
+# to take. The system + tools prompt eats the rest; if perception alone
+# blows past this fraction, trim further before sending to the model.
+PERCEPTION_TOKEN_FRACTION = 0.5
+
+
+def perception_token_ceiling(hero: Hero) -> int:
+    """Hard ceiling on the perception payload's estimated token count.
+    Used by perception_for to decide whether to trim further past the
+    WIS-derived list caps."""
+    return max(64, int(max_tokens_per_tick(hero) * PERCEPTION_TOKEN_FRACTION))
