@@ -1588,7 +1588,10 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
     if verb == "flee":
         return _resolve_flee(db, hero, action)
 
-    return ResolutionResult(False, {"verb": verb, "error": f"unknown verb '{verb}'"})
+    return ResolutionResult(
+        False,
+        {"verb": verb, "error": f"unknown verb '{verb}'", "reason": "unknown_verb"},
+    )
 
 
 # ---------------------------------------------------------------------------

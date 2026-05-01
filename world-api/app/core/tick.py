@@ -160,6 +160,25 @@ class TickEngine:
                     )
                 )
 
+                # Surface "the model picked a verb we don't know" as a
+                # distinct parse_failure row in the event stream — same
+                # surface as bot-side JSON parse failures so spectator
+                # tooling can render both with one renderer.
+                if not result.ok and result.outcome.get("reason") == "unknown_verb":
+                    db.add(
+                        Event(
+                            tick_id=tick_id,
+                            hero_id=hero.id,
+                            zone=hero.zone,
+                            kind="parse_failure",
+                            payload={
+                                "reason": "unknown_verb",
+                                "raw_output": str(action)[:500],
+                                "fallback_action": {"do": "wait"},
+                            },
+                        )
+                    )
+
                 # NPC reactions: on a successful `say`, run scripted handlers
                 # for every NPC within radius 1, in the same tick.
                 if result.ok and action.get("do") == "say":
