@@ -233,7 +233,10 @@ def _react_via_llm(db: Session, npc: NPC, hero: Hero, message: str) -> list[Effe
         f"inventory: {inventory_summary}) says: {message!r}"
     )
 
+    from app.core.gateway_permission import SYSTEM_HERO_ID, issue_permission_token
+
     gateway_url = os.environ.get("GATEWAY_BASE_URL", "http://llm-gateway:8001").rstrip("/")
+    npc_max_tokens = 200
     payload = {
         "hero_id": str(hero.id),
         "model": "qwen3-4b",
@@ -241,7 +244,12 @@ def _react_via_llm(db: Session, npc: NPC, hero: Hero, message: str) -> list[Effe
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "max_tokens": 200,
+        "max_tokens": npc_max_tokens,
+        # Server-side trusted call — mint a system permission token so the
+        # gateway's per-call cap still applies uniformly to NPC dialogue.
+        "permission_token": issue_permission_token(
+            hero_id=SYSTEM_HERO_ID, max_tokens=npc_max_tokens,
+        ),
     }
     req = urllib.request.Request(
         f"{gateway_url}/think",

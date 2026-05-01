@@ -22,7 +22,8 @@ from app.core.actions import defending_this_tick, perception_for, resolve
 from app.core.combat import run_mob_phase
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.core.hero_budgets import mana_regen_per_tick
+from app.core.gateway_permission import issue_permission_token
+from app.core.hero_budgets import mana_regen_per_tick, max_tokens_per_tick
 from app.core.models import NPC, Event, Hero, Item, Tick
 from app.domains.npc.behaviors import apply_effects, react_to_receive, react_to_say
 
@@ -316,6 +317,10 @@ class TickEngine:
                 perception_payloads[str(hero.id)] = {
                     "type": "perception",
                     "tick_id": tick_id,
+                    "gateway_permission_token": issue_permission_token(
+                        hero_id=str(hero.id),
+                        max_tokens=max_tokens_per_tick(hero),
+                    ),
                     "your_state": {
                         "id": str(hero.id),
                         "name": hero.name,

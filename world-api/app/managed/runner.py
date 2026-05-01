@@ -139,6 +139,7 @@ class ManagedHeroTask:
             your_state=msg["your_state"],
             perception=msg["perception"],
             deadline_ms=msg.get("deadline_ms", 6000),
+            gateway_permission_token=msg.get("gateway_permission_token"),
         )
 
         # If a composite is in flight, drain its next step.
@@ -196,7 +197,7 @@ class ManagedHeroTask:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        payload = {
+        payload: dict[str, Any] = {
             "hero_id": self.hero_id,
             "model": self._model_id,
             "messages": messages,
@@ -204,6 +205,8 @@ class ManagedHeroTask:
             "tool_choice": "auto",
             "tick_id": perception.tick_id,
         }
+        if perception.gateway_permission_token:
+            payload["permission_token"] = perception.gateway_permission_token
         try:
             async with httpx.AsyncClient(base_url=_gateway_base_url(), timeout=60.0) as client:
                 r = await client.post("/think", json=payload)

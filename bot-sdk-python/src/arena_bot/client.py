@@ -46,6 +46,9 @@ class Perception:
     your_state: dict[str, Any]
     perception: dict[str, Any]
     deadline_ms: int
+    # World-api-signed cap on max_tokens for any /think call this tick.
+    # The SDK forwards it to the gateway, which enforces.
+    gateway_permission_token: str | None = None
 
 
 @dataclass
@@ -430,6 +433,7 @@ class Hero:
                                 your_state=msg["your_state"],
                                 perception=msg["perception"],
                                 deadline_ms=msg["deadline_ms"],
+                                gateway_permission_token=msg.get("gateway_permission_token"),
                             )
                             await self._handle_perception(ws, p)
                         else:
@@ -457,10 +461,17 @@ class Hero:
         tool_choice: str | dict[str, Any] | None = None,
         tick_id: int | None = None,
         retries: int = 3,
+        permission_token: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Call the gateway. Retries up to `retries` times on 502/503/504/timeout
         with exponential backoff (0.5s → 1s → 2s) so a brief llamafile blip
-        doesn't deadlock the bot."""
+        doesn't deadlock the bot.
+
+        `permission_token` is the world-api-signed cap on max_tokens for this
+        tick; the gateway rejects calls that exceed it. Callers should pass
+        `perception.gateway_permission_token` through.
+        """
         import asyncio as _asyncio
 
         payload: dict[str, Any] = {
@@ -473,6 +484,10 @@ class Hero:
             payload["tools"] = tools
             if tool_choice is not None:
                 payload["tool_choice"] = tool_choice
+        if permission_token is not None:
+            payload["permission_token"] = permission_token
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         backoff = 0.5
         last_exc: Exception | None = None
@@ -516,7 +531,10 @@ class Hero:
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         try:
-            body = await self.think(messages=messages, model=model, tick_id=perception.tick_id)
+            body = await self.think(
+                messages=messages, model=model, tick_id=perception.tick_id,
+                permission_token=perception.gateway_permission_token,
+            )
             action = parse_json_action(body["completion"])
             log.info("LLM picked: %s", action)
             return Decision(kind="llm", action=action, gateway_token=body["gateway_token"])
@@ -559,6 +577,7 @@ class Hero:
                 tools=specs,
                 tool_choice="auto",
                 tick_id=perception.tick_id,
+                permission_token=perception.gateway_permission_token,
             )
         except httpx.HTTPError as exc:
             log.warning("LLM tool action HTTP failed (%s) — falling back", exc)
