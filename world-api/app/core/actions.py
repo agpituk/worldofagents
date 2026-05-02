@@ -2,7 +2,7 @@
 
 Verbs supported in this batch:
   wait, look, move, say, examine, pickup, drop, give, travel,
-  attack, attack_hero, defend, flee, equip, unequip, gather, craft
+  attack, attack_hero, defend, flee, equip, unequip, gather, fish, craft
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.dice import d20, roll
@@ -23,7 +23,7 @@ from app.core.hero_budgets import (
     perception_token_ceiling,
 )
 from app.core.memory import replace_memory, update_memory
-from app.core.models import Bounty, Building, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
+from app.core.models import Building, Contract, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
 
 # Per-tick transient state for `defend` — heroes who declared defend get +5 AC for
 # the rest of the tick. The set is keyed by hero_id (str). Cleared each tick
@@ -47,6 +47,110 @@ def _grant_xp(hero: Hero, skill: str, amount: int) -> None:
     skills = dict(hero.skills) if isinstance(hero.skills, dict) else {}
     skills[skill] = int(skills.get(skill, 0) or 0) + amount
     hero.skills = skills
+
+
+# Phase 5: skill titles & reputation. These are derived (no schema change)
+# but live as helpers here so every surface — HeroOut, perception,
+# leaderboards, item tooltips — agrees on what "GM Fisherman" means.
+
+# Per-skill noun used in the rendered "GM <noun>" title. Falls back to a
+# title-cased version of the skill key when not listed (e.g. a future
+# `bardic` skill would render as "GM Bardic" until added here).
+_SKILL_TITLE_NOUN: dict[str, str] = {
+    "magic": "Mage",
+    "melee": "Warrior",
+    "stealth": "Rogue",
+    "taming": "Tamer",
+    "mining": "Miner",
+    "smithing": "Smith",
+    "fishing": "Fisher",
+    "cooking": "Cook",
+    "alchemy": "Alchemist",
+    "herbalism": "Herbalist",
+    "lumberjacking": "Lumberjack",
+    "carpentry": "Carpenter",
+    "tailoring": "Tailor",
+    "scribe": "Scribe",
+    "tinkering": "Tinker",
+}
+
+
+def _skill_rank(level: int) -> str | None:
+    """The text rank for a skill level: Skilled / Expert / Grandmaster /
+    None. The thresholds match the roadmap: 70 / 90 / 100."""
+    if level >= 100:
+        return "Grandmaster"
+    if level >= 90:
+        return "Expert"
+    if level >= 70:
+        return "Skilled"
+    return None
+
+
+def skill_titles_for(skills_dict: dict[str, int] | None) -> dict[str, str]:
+    """Per-skill rank string (Skilled / Expert / Grandmaster) keyed by
+    skill name. Skills below the Skilled threshold are omitted. Used by
+    HeroOut + the per-skill leaderboard."""
+    out: dict[str, str] = {}
+    for name, xp in (skills_dict or {}).items():
+        level = min(100, int(xp or 0) // 10)
+        rank = _skill_rank(level)
+        if rank:
+            out[name] = rank
+    return out
+
+
+def top_title_for(skills_dict: dict[str, int] | None) -> str | None:
+    """Single rendered identity title — "GM Fisherman", "Expert Smith",
+    "Skilled Mage" — picked from the hero's highest skill that's at
+    least Skilled. Used by visible_heroes so peers can read identity at
+    a glance, and by the hero detail page as the headline.
+
+    Tiebreaks by skill name alphabetically so the rendering is stable
+    across ticks for a hero with two skills at the same level."""
+    skills_dict = skills_dict or {}
+    best: tuple[int, str] | None = None  # (level, skill_name)
+    for name, xp in skills_dict.items():
+        level = min(100, int(xp or 0) // 10)
+        if _skill_rank(level) is None:
+            continue
+        candidate = (level, name)
+        if best is None or candidate > best:
+            best = candidate
+    if best is None:
+        return None
+    level, name = best
+    rank = _skill_rank(level)
+    noun = _SKILL_TITLE_NOUN.get(name, name.replace("_", " ").title())
+    if rank == "Grandmaster":
+        return f"GM {noun}"
+    return f"{rank} {noun}"
+
+
+def _reputation_for(hero: "Hero") -> dict[str, Any]:
+    """Public reputation counters. Sourced from hero.memory (kills,
+    pvp_kills) plus derived flags (status). Surfaced to peers via
+    visible_heroes and to the LLM via perception, so a hero deciding
+    whether to trust a stranger can see "killed 3 heroes" before
+    accepting their contract."""
+    mem = hero.memory if isinstance(hero.memory, dict) else {}
+    return {
+        "kills": int(mem.get("kills", 0) or 0),
+        "pvp_kills": int(mem.get("pvp_kills", 0) or 0),
+        "dead": hero.status == "dead",
+    }
+
+
+def _increment_kills(db: Session, hero: Hero, *, victim_kind: str) -> None:
+    """Bump `hero.memory.kills` (always) and `hero.memory.pvp_kills`
+    (only when victim was another hero). Goes through `update_memory`
+    so the bump emits a memory.mutated event that spectators see."""
+    mem = hero.memory if isinstance(hero.memory, dict) else {}
+    new_kills = int(mem.get("kills", 0) or 0) + 1
+    changes: dict[str, int] = {"kills": new_kills}
+    if victim_kind == "hero":
+        changes["pvp_kills"] = int(mem.get("pvp_kills", 0) or 0) + 1
+    update_memory(db, hero, source=f"kill_{victim_kind}", **changes)
 
 
 def _current_tick(db: Session) -> int:
@@ -251,93 +355,462 @@ def _coerce_item_list(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _resolve_post_bounty(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
-    """Place a public hit on another hero. Pays the gold up front (held by
-    the bounty system); the next hero who lands the killing blow on the
-    target collects the prize. The poster cannot collect their own bounty.
+# ---------------------------------------------------------------------------
+# Contracts (Phase 4)
+# ---------------------------------------------------------------------------
+#
+# A Contract is "I'll pay you to do X" backed by escrowed gold. Six kinds:
+#
+#   bounty        — kill <target_hero>, paid to whoever lands the blow.
+#   assassination — like bounty but only counts inside zone_scope (or
+#                   a tighter window enforced by expires_at_tick).
+#   defense       — claimer kills any hostile in the poster's zone while
+#                   adjacent to the poster. One-shot payout per claim.
+#   delivery      — claimer `give`s a specific item to a specific NPC in
+#                   the destination zone.
+#   escort        — claimer follows the poster between two zones for K
+#                   ticks (auto-pay TODO; needs per-tick presence track).
+#   caravan       — like delivery but the item drops on death (auto-pay
+#                   on give like delivery; the loot-drop hook is TODO).
+#
+# Status flow: open → (claimed if it's a "claimed" kind) → fulfilled
+# (payout) | expired (refund). Bounty / assassination skip claimed and
+# go open → fulfilled directly when the kill lands.
+#
+# `_CONTRACT_KINDS` is the gate — verbs reject anything not in this set.
+# `_CLAIMED_KINDS` lists the kinds that need an explicit `claim_contract`
+# step before they can be fulfilled (bounty/assassination are not in
+# this set; anyone with a fatal blow on the target wins).
 
-    Bounties cannot be placed on heroes inside sanctuaries (no point — they
-    can't be killed there) or against the poster themselves."""
-    target_name = str(action.get("target") or "").strip()
-    gold = int(action.get("gold") or 0)
+_CONTRACT_KINDS = {
+    "bounty", "assassination", "defense", "delivery", "escort", "caravan",
+}
+_CLAIMED_KINDS = {"defense", "delivery", "escort", "caravan"}
+_MIN_REWARD = 10
+
+
+def _serialize_contract_brief(c: Contract) -> dict[str, Any]:
+    """Compact dict for perception payloads + reflex bindings. Heavy
+    fields (poster_hero_id raw, internal timestamps) are kept off the
+    wire. Used by `my_contracts` and `open_contracts_in_zone`."""
+    return {
+        "id": str(c.id),
+        "kind": c.kind,
+        "poster": c.poster_name,
+        "target_ref": c.target_ref,
+        "reward_gold": int(c.reward_gold or 0),
+        "status": c.status,
+        "zone_scope": c.zone_scope,
+        "reason": c.reason,
+        "terms": dict(c.terms or {}),
+        "created_at_tick": int(c.created_at_tick or 0),
+        "expires_at_tick": c.expires_at_tick,
+        "claimed_by": str(c.claimed_by_hero_id) if c.claimed_by_hero_id else None,
+    }
+
+
+def _resolve_post_contract(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    """Post a new contract. The reward gold is escrowed up front — pulled
+    from the poster's wallet on success, refunded on cancel/expire, paid
+    out to the claimer on fulfill.
+
+    Validates per-kind required fields. The poster is implicit (the
+    hero), so the action shape is:
+
+        {
+          do: post_contract,
+          kind: bounty | assassination | defense | delivery | escort | caravan,
+          reward: int,                    # min _MIN_REWARD
+          target: str (kind-specific),    # hero name / npc slug / item slug
+          zone: str (kind-specific),      # zone scope / dest zone / start zone
+          ttl: int (optional),            # ticks until expires_at_tick
+          reason: str (optional),
+          terms: dict (optional, kind-specific extras),
+        }
+    """
+    kind = str(action.get("kind") or "").strip().lower()
+    if kind not in _CONTRACT_KINDS:
+        return ResolutionResult(
+            False,
+            {"verb": "post_contract", "error": f"unknown kind '{kind}'", "valid_kinds": sorted(_CONTRACT_KINDS)},
+        )
+    reward = int(action.get("reward") or action.get("gold") or 0)
+    if reward < _MIN_REWARD:
+        return ResolutionResult(
+            False, {"verb": "post_contract", "error": f"minimum reward is {_MIN_REWARD}g"}
+        )
+    if _hero_gold(hero) < reward:
+        return ResolutionResult(
+            False,
+            {"verb": "post_contract", "error": f"insufficient gold ({_hero_gold(hero)} < {reward})"},
+        )
+
+    target_arg = (action.get("target") or "").strip() if isinstance(action.get("target"), str) else None
+    zone_arg = action.get("zone")
+    if isinstance(zone_arg, str):
+        zone_arg = zone_arg.strip() or None
+    else:
+        zone_arg = None
+    ttl = action.get("ttl")
+    expires_at_tick: int | None = None
+    if isinstance(ttl, int) and ttl > 0:
+        expires_at_tick = _current_tick(db) + ttl
     reason = str(action.get("reason") or "")[:280]
-    if not target_name:
-        return ResolutionResult(False, {"verb": "post_bounty", "error": "missing target"})
-    if gold < 10:
-        return ResolutionResult(False, {"verb": "post_bounty", "error": "minimum bounty is 10g"})
-    if _hero_gold(hero) < gold:
-        return ResolutionResult(False, {"verb": "post_bounty", "error": f"insufficient gold ({_hero_gold(hero)} < {gold})"})
+    extra_terms = action.get("terms") if isinstance(action.get("terms"), dict) else {}
 
-    target = db.scalar(select(Hero).where(Hero.name == target_name))
-    if target is None:
-        return ResolutionResult(False, {"verb": "post_bounty", "error": "target hero not found"})
-    if target.id == hero.id:
-        return ResolutionResult(False, {"verb": "post_bounty", "error": "cannot post a bounty on yourself"})
-    if target.status != "alive":
-        return ResolutionResult(False, {"verb": "post_bounty", "error": "target is already dead"})
+    target_hero_id: uuid.UUID | None = None
+    target_ref: str | None = None
+    zone_scope: str | None = None
+    terms: dict[str, Any] = dict(extra_terms or {})
 
-    # Burn the gold up front. If the bounty is never claimed, gold is
-    # effectively destroyed — the player paid for the public threat.
-    _set_hero_gold(db, hero, _hero_gold(hero) - gold, source="post_bounty")
+    # ── Per-kind validation + field shaping ─────────────────────────────
+    if kind in ("bounty", "assassination"):
+        if not target_arg:
+            return ResolutionResult(False, {"verb": "post_contract", "error": "missing target hero"})
+        target_hero = db.scalar(select(Hero).where(Hero.name == target_arg))
+        if target_hero is None:
+            return ResolutionResult(False, {"verb": "post_contract", "error": "target hero not found"})
+        if target_hero.id == hero.id:
+            return ResolutionResult(
+                False, {"verb": "post_contract", "error": "cannot post a contract on yourself"}
+            )
+        if target_hero.status != "alive":
+            return ResolutionResult(False, {"verb": "post_contract", "error": "target is already dead"})
+        target_hero_id = target_hero.id
+        target_ref = target_hero.name
+        if kind == "assassination":
+            if not zone_arg:
+                return ResolutionResult(
+                    False, {"verb": "post_contract", "error": "assassination requires zone"}
+                )
+            zone_scope = zone_arg
 
-    bounty = Bounty(
+    elif kind == "defense":
+        # Defense protects the poster's current zone. Duration is in
+        # `terms.duration_ticks` (defaults to 20). Claimer must be
+        # adjacent to poster when the hostile dies.
+        zone_scope = zone_arg or hero.zone
+        terms.setdefault("duration_ticks", 20)
+        terms.setdefault("posted_in_zone", hero.zone)
+
+    elif kind == "delivery" or kind == "caravan":
+        item_slug = str(terms.get("item") or terms.get("item_slug") or target_arg or "")
+        dest_zone = str(terms.get("dest_zone") or zone_arg or "")
+        dest_npc = str(terms.get("dest_npc") or "")
+        if not item_slug:
+            return ResolutionResult(False, {"verb": "post_contract", "error": f"{kind} requires terms.item"})
+        if not dest_zone:
+            return ResolutionResult(
+                False, {"verb": "post_contract", "error": f"{kind} requires terms.dest_zone"}
+            )
+        if not dest_npc:
+            return ResolutionResult(
+                False, {"verb": "post_contract", "error": f"{kind} requires terms.dest_npc"}
+            )
+        terms["item"] = item_slug
+        terms["dest_zone"] = dest_zone
+        terms["dest_npc"] = dest_npc
+        terms.setdefault("qty", 1)
+        if kind == "caravan":
+            terms.setdefault("heavy", True)
+            terms.setdefault("drop_on_death", True)
+        target_ref = item_slug
+        zone_scope = dest_zone
+
+    elif kind == "escort":
+        # Escort is a per-tick-presence contract. We accept the post and
+        # store the terms but auto-fulfill is TODO — for now the
+        # claimer/poster have to cancel manually after arrival.
+        from_zone = str(terms.get("from_zone") or hero.zone)
+        to_zone = str(terms.get("to_zone") or zone_arg or "")
+        if not to_zone:
+            return ResolutionResult(
+                False, {"verb": "post_contract", "error": "escort requires terms.to_zone"}
+            )
+        terms["from_zone"] = from_zone
+        terms["to_zone"] = to_zone
+        terms.setdefault("follow_radius", 3)
+        terms.setdefault("duration_ticks", 30)
+        zone_scope = to_zone
+
+    # Escrow the reward.
+    _set_hero_gold(db, hero, _hero_gold(hero) - reward, source=f"post_contract_{kind}")
+
+    contract = Contract(
         id=uuid.uuid4(),
-        target_hero_id=target.id, target_name=target.name,
-        poster_hero_id=hero.id, poster_name=hero.name,
-        reason=reason, gold=gold, status="open",
+        kind=kind,
+        poster_hero_id=hero.id,
+        poster_name=hero.name,
+        target_hero_id=target_hero_id,
+        target_ref=target_ref,
+        reward_gold=reward,
+        status="open",
+        zone_scope=zone_scope,
+        reason=reason,
+        terms=terms,
         created_at_tick=_current_tick(db),
+        expires_at_tick=expires_at_tick,
     )
-    db.add(bounty)
+    db.add(contract)
+
+    journal_text = f"Posted a {reward}g {kind} contract"
+    if target_ref:
+        journal_text += f" — target: {target_ref}"
+    if zone_scope:
+        journal_text += f" in {zone_scope.replace('_', ' ')}"
+    journal_text += "."
     _journal_milestone(
         db, hero,
-        text=f"Posted a {gold}g bounty on {target.name}. Reason: {reason or '—'}.",
-        tags=["milestone", "bounty_posted", target.name.lower().replace(" ", "_")],
+        text=journal_text,
+        tags=["milestone", "contract_posted", kind],
         dedupe=False,
     )
+
     return ResolutionResult(
         True,
         {
-            "verb": "post_bounty",
-            "bounty_id": str(bounty.id),
-            "target": target.name,
-            "gold": gold,
+            "verb": "post_contract",
+            "contract_id": str(contract.id),
+            "kind": kind,
+            "target_ref": target_ref,
+            "zone_scope": zone_scope,
+            "reward_gold": reward,
+            "expires_at_tick": expires_at_tick,
             "poster_gold_remaining": _hero_gold(hero),
         },
     )
 
 
-def _claim_bounties_on_kill(db: Session, killer: Hero, victim_id: uuid.UUID, current_tick: int) -> list[dict[str, Any]]:
-    """Pay out every open bounty on `victim_id` to `killer`. The killer can't
-    claim a bounty they posted themselves (anti-griefing). Returns a list of
-    {bounty_id, gold, poster} dicts for the spectator stream."""
-    open_bounties = list(
+def _resolve_claim_contract(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    """Take a contract that needs an explicit claimer (defense / delivery
+    / escort / caravan). Bounty and assassination cannot be claimed —
+    the killing blow IS the claim, automatically. Re-claiming an
+    already-claimed contract fails."""
+    cid_str = str(action.get("contract_id") or "")
+    try:
+        cid = uuid.UUID(cid_str)
+    except (TypeError, ValueError):
+        return ResolutionResult(
+            False, {"verb": "claim_contract", "error": "missing or malformed contract_id"}
+        )
+    c = db.get(Contract, cid)
+    if c is None:
+        return ResolutionResult(False, {"verb": "claim_contract", "error": "contract not found"})
+    if c.kind not in _CLAIMED_KINDS:
+        return ResolutionResult(
+            False,
+            {
+                "verb": "claim_contract",
+                "error": f"{c.kind} contracts cannot be claimed — they auto-resolve on the qualifying event",
+            },
+        )
+    if c.status != "open":
+        return ResolutionResult(
+            False, {"verb": "claim_contract", "error": f"contract is {c.status}, not open"}
+        )
+    if c.poster_hero_id == hero.id:
+        return ResolutionResult(
+            False, {"verb": "claim_contract", "error": "cannot claim your own contract"}
+        )
+    current = _current_tick(db)
+    if c.expires_at_tick is not None and current >= c.expires_at_tick:
+        return ResolutionResult(
+            False, {"verb": "claim_contract", "error": "contract has expired"}
+        )
+
+    c.status = "claimed"
+    c.claimed_by_hero_id = hero.id
+    c.claimed_at_tick = current
+    # On claim, stamp the tick so per-tick logic (defense duration) can
+    # measure from this point.
+    if c.kind == "defense":
+        terms = dict(c.terms or {})
+        terms["claimed_at_tick"] = current
+        c.terms = terms
+
+    _journal_milestone(
+        db, hero,
+        text=f"Claimed a {c.kind} contract from {c.poster_name} ({c.reward_gold}g).",
+        tags=["milestone", "contract_claimed", c.kind, str(c.id)],
+        dedupe=False,
+    )
+    return ResolutionResult(
+        True,
+        {
+            "verb": "claim_contract",
+            "contract_id": str(c.id),
+            "kind": c.kind,
+            "reward_gold": int(c.reward_gold or 0),
+        },
+    )
+
+
+def _resolve_cancel_contract(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    """Cancel a contract you posted. Refunds the escrowed reward to you
+    if it's still open or has been claimed but not fulfilled. Heroes
+    cannot cancel contracts they didn't post."""
+    cid_str = str(action.get("contract_id") or "")
+    try:
+        cid = uuid.UUID(cid_str)
+    except (TypeError, ValueError):
+        return ResolutionResult(
+            False, {"verb": "cancel_contract", "error": "missing or malformed contract_id"}
+        )
+    c = db.get(Contract, cid)
+    if c is None:
+        return ResolutionResult(False, {"verb": "cancel_contract", "error": "contract not found"})
+    if c.poster_hero_id != hero.id:
+        return ResolutionResult(
+            False, {"verb": "cancel_contract", "error": "you didn't post this contract"}
+        )
+    if c.status not in ("open", "claimed"):
+        return ResolutionResult(
+            False, {"verb": "cancel_contract", "error": f"contract is {c.status}, cannot cancel"}
+        )
+
+    refund = int(c.reward_gold or 0)
+    _set_hero_gold(db, hero, _hero_gold(hero) + refund, source="cancel_contract")
+    c.status = "expired"
+    return ResolutionResult(
+        True,
+        {
+            "verb": "cancel_contract",
+            "contract_id": str(c.id),
+            "kind": c.kind,
+            "refunded_gold": refund,
+        },
+    )
+
+
+def _payout_contract(
+    db: Session, c: Contract, claimer: Hero, current_tick: int, *, journal: bool = True
+) -> int:
+    """Mark `c` fulfilled and pay the reward to `claimer`. Idempotent
+    against a re-entry — checks status before paying. Returns the
+    amount paid (0 if no-op)."""
+    if c.status == "fulfilled":
+        return 0
+    reward = int(c.reward_gold or 0)
+    c.status = "fulfilled"
+    c.fulfilled_at_tick = current_tick
+    if c.claimed_by_hero_id is None:
+        c.claimed_by_hero_id = claimer.id
+        c.claimed_at_tick = current_tick
+    if reward > 0:
+        _set_hero_gold(db, claimer, _hero_gold(claimer) + reward, source=f"contract_{c.kind}_payout")
+    if journal and reward > 0:
+        target_label = c.target_ref or c.zone_scope or c.kind
+        _journal_milestone(
+            db, claimer,
+            text=f"Fulfilled {c.kind} contract on {target_label} ({reward}g).",
+            tags=["milestone", "contract_fulfilled", c.kind, str(c.id)],
+            dedupe=False,
+        )
+    return reward
+
+
+def _claim_bounties_on_kill(
+    db: Session, killer: Hero, victim_id: uuid.UUID, current_tick: int
+) -> list[dict[str, Any]]:
+    """Pay out every open bounty + qualifying assassination contract on
+    `victim_id` to `killer`. Killer cannot collect their own posts —
+    those are refunded instead. Assassinations only pay if the kill
+    happened inside the contract's `zone_scope`. Returns a list of
+    {contract_id, kind, gold, poster} dicts for the spectator stream.
+
+    Kept for backwards-compat with the call sites in attack/cast — the
+    function name is historical; it now resolves both bounties and
+    assassinations.
+    """
+    open_contracts = list(
         db.scalars(
-            select(Bounty).where(
-                Bounty.target_hero_id == victim_id, Bounty.status == "open",
+            select(Contract).where(
+                Contract.target_hero_id == victim_id,
+                Contract.status == "open",
+                Contract.kind.in_(["bounty", "assassination"]),
             )
         )
     )
     payouts: list[dict[str, Any]] = []
-    total_payout = 0
-    for b in open_bounties:
-        if b.poster_hero_id == killer.id:
-            # Self-posted bounty — refund instead of paying out.
-            _set_hero_gold(db, killer, _hero_gold(killer) + b.gold, source="bounty_refund")
-            b.status = "expired"
+    for c in open_contracts:
+        # Self-posted — refund and expire instead of paying out (anti-griefing).
+        if c.poster_hero_id == killer.id:
+            refund = int(c.reward_gold or 0)
+            if refund > 0:
+                _set_hero_gold(db, killer, _hero_gold(killer) + refund, source="contract_self_refund")
+            c.status = "expired"
             continue
-        b.status = "claimed"
-        b.claimed_by_hero_id = killer.id
-        b.claimed_at_tick = current_tick
-        total_payout += b.gold
-        payouts.append({"bounty_id": str(b.id), "gold": b.gold, "poster": b.poster_name})
-    if total_payout > 0:
-        _set_hero_gold(db, killer, _hero_gold(killer) + total_payout, source="bounty_claim")
+        # Assassination is zone-scoped.
+        if c.kind == "assassination" and c.zone_scope and c.zone_scope != killer.zone:
+            continue
+        # Expired window.
+        if c.expires_at_tick is not None and current_tick >= c.expires_at_tick:
+            c.status = "expired"
+            continue
+        paid = _payout_contract(db, c, killer, current_tick, journal=False)
+        payouts.append({
+            "contract_id": str(c.id),
+            "kind": c.kind,
+            "gold": paid,
+            "poster": c.poster_name,
+        })
+    if payouts:
+        total = sum(p["gold"] for p in payouts)
         _journal_milestone(
             db, killer,
-            text=f"Claimed {total_payout}g in bounties on {open_bounties[0].target_name}.",
-            tags=["milestone", "bounty_claimed", str(victim_id)],
+            text=f"Claimed {total}g across {len(payouts)} contract(s) on {open_contracts[0].target_ref}.",
+            tags=["milestone", "contract_fulfilled", str(victim_id)],
             dedupe=False,
         )
+    return payouts
+
+
+def _resolve_defense_contracts_on_kill(
+    db: Session, killer: Hero, *, victim_kind: str, current_tick: int
+) -> list[dict[str, Any]]:
+    """When `killer` lands a fatal blow on a hostile (mob or hero) in a
+    zone where they hold an active defense contract AND they're adjacent
+    to the poster, fulfill the contract. Called from the attack and
+    attack_hero kill paths.
+
+    Returns a list of fulfilled {contract_id, gold, poster} dicts.
+    """
+    contracts = list(
+        db.scalars(
+            select(Contract).where(
+                Contract.kind == "defense",
+                Contract.status == "claimed",
+                Contract.claimed_by_hero_id == killer.id,
+                Contract.zone_scope == killer.zone,
+            )
+        )
+    )
+    if not contracts:
+        return []
+    payouts: list[dict[str, Any]] = []
+    for c in contracts:
+        # Find the poster — must be in the same zone, adjacent to killer.
+        if c.poster_hero_id is None:
+            continue
+        poster = db.get(Hero, c.poster_hero_id)
+        if poster is None or poster.status != "alive" or poster.zone != killer.zone:
+            continue
+        if abs(poster.pos_x - killer.pos_x) + abs(poster.pos_y - killer.pos_y) > 2:
+            continue
+        # Expired window.
+        if c.expires_at_tick is not None and current_tick >= c.expires_at_tick:
+            c.status = "expired"
+            refund = int(c.reward_gold or 0)
+            if refund > 0:
+                _set_hero_gold(db, poster, _hero_gold(poster) + refund, source="contract_defense_expired")
+            continue
+        paid = _payout_contract(db, c, killer, current_tick)
+        payouts.append({
+            "contract_id": str(c.id),
+            "kind": "defense",
+            "gold": paid,
+            "poster": c.poster_name,
+        })
     return payouts
 
 
@@ -633,13 +1106,21 @@ def _add_to_inventory(
     db: Session, hero: Hero, *,
     slug: str, name: str, kind: str, props: dict | None = None, qty: int = 1,
     description: str = "",
+    crafted_by_id: uuid.UUID | None = None,
+    crafted_by_name: str | None = None,
 ) -> Item:
     """Add `qty` of `slug` to hero's inventory, stacking onto an existing
-    stack of the same slug if present; otherwise create a new row."""
-    stack = _inventory_stack(db, hero, slug)
-    if stack is not None:
-        stack.quantity = int(stack.quantity or 1) + qty
-        return stack
+    stack of the same slug if present; otherwise create a new row.
+
+    When `crafted_by_id` is set, always creates a fresh row (no stacking)
+    so the crafter mark survives — stacking would erase the per-item
+    provenance, and a "crafted by" item being absorbed into an unmarked
+    stack would silently strip the maker's name."""
+    if crafted_by_id is None:
+        stack = _inventory_stack(db, hero, slug)
+        if stack is not None:
+            stack.quantity = int(stack.quantity or 1) + qty
+            return stack
     item = Item(
         id=uuid.uuid4(),
         slug=slug, name=name, kind=kind,
@@ -647,6 +1128,8 @@ def _add_to_inventory(
         props=dict(props or {}),
         owner_hero_id=hero.id,
         quantity=qty,
+        crafted_by=crafted_by_id,
+        crafted_by_name=crafted_by_name,
     )
     db.add(item)
     return item
@@ -736,8 +1219,22 @@ def _resolve_unequip(db: Session, hero: Hero, action: dict[str, Any]) -> Resolut
 # ---------------------------------------------------------------------------
 
 
-def _resolve_gather(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
-    """Gather from a ResourceNode at the hero's tile."""
+def _resolve_node_harvest(
+    db: Session,
+    hero: Hero,
+    *,
+    verb: str,
+    node_kind_filter,  # callable(node.kind) -> bool
+    no_node_error: str,
+) -> ResolutionResult:
+    """Shared core for `gather` and `fish`. Both walk the nodes on the hero's
+    tile, pick the first non-depleted one matching `node_kind_filter`, yield
+    one item, deplete the node, and grant XP into `node.skill_required`.
+
+    The split exists so a fisher's reflex DSL can declare `do: fish` and
+    only act on fishing holes (and a miner's `do: gather` skips them) —
+    the verb you choose is part of the build, not just plumbing.
+    """
     nodes = list(
         db.scalars(
             select(ResourceNode).where(
@@ -747,33 +1244,31 @@ def _resolve_gather(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
             )
         )
     )
-    if not nodes:
-        return ResolutionResult(False, {"verb": "gather", "error": "no resource node here"})
+    matching = [n for n in nodes if node_kind_filter(n.kind)]
+    if not matching:
+        return ResolutionResult(False, {"verb": verb, "error": no_node_error})
 
-    # current_tick comes from the tick engine — read latest Tick id as a stand-in
     from app.core.models import Tick as _T
     current_tick = int(db.scalar(select(_T.id).order_by(_T.id.desc()).limit(1)) or 0)
 
-    for node in nodes:
+    for node in matching:
         if node.depleted_until_tick is not None and current_tick < node.depleted_until_tick:
             continue
-        # Yield: one unit of the node's type, stacking onto inventory.
         _add_to_inventory(
             db, hero,
             slug=node.yield_item_slug,
             name=node.yield_item_name,
             kind=node.yield_item_kind,
-            description=f"Gathered from {node.name}.",
+            description=f"Harvested from {node.name}.",
             qty=1,
         )
         node.depleted_until_tick = current_tick + node.respawn_after_ticks
         _grant_xp(hero, node.skill_required, 1)
-        # Advance any active gather_count quests for this resource type
         completed_quests = _quest_progress(db, hero, "gather_count", node.yield_item_slug, 1)
         return ResolutionResult(
             True,
             {
-                "verb": "gather",
+                "verb": verb,
                 "node": node.slug,
                 "yielded": node.yield_item_slug,
                 "yielded_qty_now": _inventory_total(db, hero, node.yield_item_slug),
@@ -784,7 +1279,28 @@ def _resolve_gather(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
             },
         )
 
-    return ResolutionResult(False, {"verb": "gather", "error": "node depleted, try later"})
+    return ResolutionResult(False, {"verb": verb, "error": "node depleted, try later"})
+
+
+def _resolve_gather(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    """Gather a non-fish resource (ore, herb, log) from a ResourceNode at
+    the hero's tile. Fishing holes are excluded — use `fish` for those."""
+    return _resolve_node_harvest(
+        db, hero,
+        verb="gather",
+        node_kind_filter=lambda k: k != "fishing_hole",
+        no_node_error="no resource node here",
+    )
+
+
+def _resolve_fish(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    """Fish from a fishing_hole ResourceNode at the hero's tile."""
+    return _resolve_node_harvest(
+        db, hero,
+        verb="fish",
+        node_kind_filter=lambda k: k == "fishing_hole",
+        no_node_error="no fishing hole here",
+    )
 
 
 def _resolve_craft(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
@@ -837,7 +1353,8 @@ def _resolve_craft(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
     for inp in recipe.inputs:
         _consume_from_inventory(db, hero, inp["slug"], int(inp.get("count", 1)))
 
-    # Produce output (stack it).
+    # Produce output and stamp the crafter mark. Crafted items always
+    # spawn as a fresh row (no stacking) so the maker's name survives.
     _add_to_inventory(
         db, hero,
         slug=recipe.output_slug,
@@ -846,6 +1363,8 @@ def _resolve_craft(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
         description=recipe.output_description,
         props=dict(recipe.output_props or {}),
         qty=1,
+        crafted_by_id=hero.id,
+        crafted_by_name=hero.name,
     )
     _grant_xp(hero, recipe.skill_required, 2)
 
@@ -1064,6 +1583,7 @@ def _resolve_cast(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
             if killed:
                 target_hero.status = "dead"
                 target_hero.died_at_tick = _current_tick(db)
+                _increment_kills(db, hero, victim_kind="hero")
             outcome.update(
                 target=target_hero.name, target_kind="hero", damage=damage,
                 target_hp_remaining=target_hero.hp, killed=killed,
@@ -1451,7 +1971,15 @@ def _visible_heroes_in_zone(
     if limit is not None:
         nearby = nearby[:limit]
     return [
-        {"kind": "hero", "id": str(o.id), "name": o.name, "pos": [o.pos_x, o.pos_y], "hp": o.hp}
+        {
+            "kind": "hero",
+            "id": str(o.id),
+            "name": o.name,
+            "pos": [o.pos_x, o.pos_y],
+            "hp": o.hp,
+            "top_title": top_title_for(o.skills),
+            "reputation": _reputation_for(o),
+        }
         for o in nearby
     ]
 
@@ -1544,6 +2072,9 @@ _VERB_SCHEMAS: dict[str, dict[str, type | tuple[type, ...]]] = {
     "buy_house": {"slug": str},
     "accept_offer": {"offer_id": str},
     "reject_offer": {"offer_id": str},
+    "post_contract": {"kind": str, "reward?": int},
+    "claim_contract": {"contract_id": str},
+    "cancel_contract": {"contract_id": str},
 }
 
 
@@ -1648,6 +2179,9 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
     if verb == "gather":
         return _resolve_gather(db, hero, action)
 
+    if verb == "fish":
+        return _resolve_fish(db, hero, action)
+
     if verb == "craft":
         return _resolve_craft(db, hero, action)
 
@@ -1703,7 +2237,26 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
         return _resolve_register_tournament(db, hero, action)
 
     if verb == "post_bounty":
-        return _resolve_post_bounty(db, hero, action)
+        # Phase 4: post_bounty is a thin alias over post_contract with
+        # kind="bounty" so existing manifests keep working. The action's
+        # `gold` field maps to post_contract's `reward`.
+        rewritten = {
+            "do": "post_contract",
+            "kind": "bounty",
+            "target": action.get("target"),
+            "reward": action.get("gold") or action.get("reward"),
+            "reason": action.get("reason", ""),
+        }
+        return _resolve_post_contract(db, hero, rewritten)
+
+    if verb == "post_contract":
+        return _resolve_post_contract(db, hero, action)
+
+    if verb == "claim_contract":
+        return _resolve_claim_contract(db, hero, action)
+
+    if verb == "cancel_contract":
+        return _resolve_cancel_contract(db, hero, action)
 
     if verb == "attack":
         return _resolve_attack(db, hero, action)
@@ -1797,6 +2350,14 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
                 source="attack_mob_loot",
             )
         _grant_xp(hero, "melee", 5)
+        _increment_kills(db, hero, victim_kind="mob")
+        # Defense contracts: claimer killed a hostile while adjacent to
+        # their poster in the protected zone. The function returns
+        # payout entries we surface back into the attack outcome so
+        # spectators see the contract fire on the same beat as the kill.
+        defense_payouts = _resolve_defense_contracts_on_kill(
+            db, hero, victim_kind="mob", current_tick=_current_tick(db)
+        )
         completed_quests = _quest_progress(db, hero, "kill_count", target.slug, 1)
         _grant_rep(hero, "council", 1, db=db)
         # Faction-aligned mobs grant per-faction shifts on kill.
@@ -1944,6 +2505,7 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
     if killed:
         target.status = "dead"
         target.died_at_tick = _current_tick(db)
+        _increment_kills(db, hero, victim_kind="hero")
         _credit_tournament_kill(db, hero, hero.zone, _current_tick(db))
         bounty_payouts = _claim_bounties_on_kill(db, hero, target.id, _current_tick(db))
         if bounty_payouts:
@@ -2258,7 +2820,42 @@ def _resolve_give(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
     new_props["held_by_npc"] = npc.slug
     item.props = new_props
 
-    return ResolutionResult(True, {"verb": "give", "to": npc.slug, "item": item.slug})
+    # Phase 4: delivery + caravan contract auto-fulfill. The hero may be
+    # carrying out a contract whose terms specify "give item X to NPC Y
+    # in zone Z" — when those align with this give, we close it out.
+    delivery_payouts: list[dict[str, Any]] = []
+    current_tick = _current_tick(db)
+    delivery_contracts = list(
+        db.scalars(
+            select(Contract).where(
+                Contract.kind.in_(["delivery", "caravan"]),
+                Contract.status == "claimed",
+                Contract.claimed_by_hero_id == hero.id,
+                Contract.zone_scope == hero.zone,
+            )
+        )
+    )
+    for c in delivery_contracts:
+        terms = dict(c.terms or {})
+        if terms.get("item") != item.slug:
+            continue
+        if terms.get("dest_npc") != npc.slug:
+            continue
+        if c.expires_at_tick is not None and current_tick >= c.expires_at_tick:
+            c.status = "expired"
+            continue
+        paid = _payout_contract(db, c, hero, current_tick)
+        delivery_payouts.append({
+            "contract_id": str(c.id),
+            "kind": c.kind,
+            "gold": paid,
+            "poster": c.poster_name,
+        })
+
+    outcome: dict[str, Any] = {"verb": "give", "to": npc.slug, "item": item.slug}
+    if delivery_payouts:
+        outcome["contracts_fulfilled"] = delivery_payouts
+    return ResolutionResult(True, outcome)
 
 
 # ---------------------------------------------------------------------------
@@ -2411,6 +3008,56 @@ def _trim_to_token_ceiling(payload: dict[str, Any], ceiling: int) -> dict[str, A
     return payload
 
 
+def _my_contracts(db: Session, hero: Hero) -> list[dict[str, Any]]:
+    """Contracts the hero is entangled with: ones they posted, plus
+    ones they've claimed. Closed/expired excluded so the binding stays
+    actionable. Sorted newest-first."""
+    rows = list(
+        db.scalars(
+            select(Contract).where(
+                Contract.status.in_(["open", "claimed"]),
+                or_(
+                    Contract.poster_hero_id == hero.id,
+                    Contract.claimed_by_hero_id == hero.id,
+                ),
+            ).order_by(Contract.created_at_tick.desc())
+        )
+    )
+    return [_serialize_contract_brief(c) for c in rows]
+
+
+def _open_contracts_in_zone(db: Session, hero: Hero, *, limit: int = 12) -> list[dict[str, Any]]:
+    """The labor market visible to a hero in their current zone. Includes:
+
+      • zone-scoped contracts (defense, assassination, delivery,
+        caravan, escort) whose `zone_scope` matches the hero's zone.
+      • zone-agnostic contracts (bounty) regardless of position — the
+        bounty board is global, not local.
+
+    Excludes contracts the hero posted themselves (they already see
+    those in `my_contracts`). Newest first, capped at `limit` for
+    perception budget."""
+    # Spectator-posted contracts have NULL poster_hero_id; SQL `!= UUID`
+    # is false for NULL, so we OR-in the IS NULL branch explicitly to
+    # keep those visible to all heroes.
+    rows = list(
+        db.scalars(
+            select(Contract).where(
+                Contract.status == "open",
+                or_(
+                    Contract.poster_hero_id.is_(None),
+                    Contract.poster_hero_id != hero.id,
+                ),
+                or_(
+                    Contract.zone_scope == hero.zone,
+                    Contract.kind == "bounty",
+                ),
+            ).order_by(Contract.created_at_tick.desc()).limit(limit)
+        )
+    )
+    return [_serialize_contract_brief(c) for c in rows]
+
+
 def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
     radius = look_radius(hero)
     budget = perception_budget(hero)
@@ -2438,6 +3085,13 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
             for i in inventory
         ],
         "visible_resources": _visible_resource_nodes(db, hero, radius),
+        # Phase 4 — contract bindings. `my_contracts` is everything I'm
+        # entangled with (posted or claimed); `open_contracts_in_zone`
+        # is the labor market currently visible to me — open contracts
+        # in this zone, plus open zone-agnostic kinds (bounty) regardless
+        # of where I am.
+        "my_contracts": _my_contracts(db, hero),
+        "open_contracts_in_zone": _open_contracts_in_zone(db, hero),
         "memory": hero.memory or {},
         "journal_recent": _journal_recent(db, hero, journal_recent_limit(hero)),
         "journal_relevant": _journal_relevant(db, hero, journal_relevant_k(hero)),

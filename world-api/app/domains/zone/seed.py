@@ -63,7 +63,7 @@ SEED_ZONES: list[dict] = [
         "kind": "frontier",
         "width": 14, "height": 6, "capacity_soft": 15,
         "description": "Mid-danger road north of Threshold. Bandits have grown bold.",
-        "connections": ["market_square", "hush_wood"],
+        "connections": ["market_square", "hush_wood", "tideway_docks"],
     },
     {
         "slug": "hush_wood",
@@ -71,6 +71,18 @@ SEED_ZONES: list[dict] = [
         "kind": "frontier",
         "width": 12, "height": 12, "capacity_soft": 15,
         "description": "Old forest. Herbs, low-mid mobs, the occasional druid.",
+        "connections": ["lantern_road"],
+    },
+    {
+        "slug": "tideway_docks",
+        "name": "Tideway Docks",
+        "kind": "frontier",
+        "width": 12, "height": 8, "capacity_soft": 12,
+        "description": (
+            "Salt-bleached pier and deeper water beyond. Threshold's maritime "
+            "edge — a reek of bait, rope, and brine. Fishers work the planks "
+            "near shore; the brave wade out to the deep-water posts."
+        ),
         "connections": ["lantern_road"],
     },
     # ── Dungeon ─────────────────────────────────────────────────────────

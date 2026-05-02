@@ -77,6 +77,13 @@ class HeroOut(BaseModel):
     build: dict[str, int]
     skills: dict[str, int] = Field(default_factory=dict)
     skill_levels: dict[str, int] = Field(default_factory=dict)
+    # Phase 5 — derived identity surface. `skill_titles` is the
+    # per-skill rank (Skilled / Expert / Grandmaster) for skills above
+    # the threshold; `top_title` is the headline string ("GM Fisherman").
+    skill_titles: dict[str, str] = Field(default_factory=dict)
+    top_title: str | None = None
+    # Phase 5 — public reputation counters. {kills, pvp_kills, dead}.
+    reputation: dict[str, Any] = Field(default_factory=dict)
     equipped: dict[str, Any] = Field(default_factory=dict)
     mana_current: int = 0
     mana_max: int = 0
@@ -92,6 +99,13 @@ class HeroOut(BaseModel):
 
     @classmethod
     def from_hero(cls, row) -> "HeroOut":
+        # Imported lazily to avoid an import cycle (actions imports models
+        # which transitively imports hero schemas via service).
+        from app.core.actions import (
+            _reputation_for,
+            skill_titles_for,
+            top_title_for,
+        )
         skills = row.skills or {}
         skill_levels = {
             name: min(100, int(xp or 0) // 10) for name, xp in skills.items()
@@ -112,6 +126,9 @@ class HeroOut(BaseModel):
             },
             skills=dict(skills),
             skill_levels=skill_levels,
+            skill_titles=skill_titles_for(dict(skills)),
+            top_title=top_title_for(dict(skills)),
+            reputation=_reputation_for(row),
             equipped=dict(row.equipped or {}),
             mana_current=int(row.mana_current or 0),
             mana_max=int(row.mana_max or 0),

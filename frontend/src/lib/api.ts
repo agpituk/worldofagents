@@ -104,6 +104,9 @@ export type Hero = {
   build: Record<string, number>;
   skills?: Record<string, number>;
   skill_levels?: Record<string, number>;
+  skill_titles?: Record<string, string>;
+  top_title?: string | null;
+  reputation?: { kills?: number; pvp_kills?: number; dead?: boolean };
   equipped?: Record<string, string | null>;
   mana_current?: number;
   mana_max?: number;
@@ -112,6 +115,23 @@ export type Hero = {
   born_at_tick?: number;
   died_at_tick?: number | null;
   manifest?: Record<string, any>;
+};
+
+export type SkillLeaderboardRow = {
+  id: string;
+  name: string;
+  author: string;
+  division: string;
+  status: string;
+  xp: number;
+  level: number;
+  rank: string | null;
+  top_title: string | null;
+};
+
+export type SkillLeaderboards = {
+  top: number;
+  boards: Record<string, SkillLeaderboardRow[]>;
 };
 
 export type LongevityRow = {
@@ -202,6 +222,18 @@ export const api = {
   listTournaments: () => fetchJson<Tournament[]>("/tournaments"),
   getTournament: (slug: string) => fetchJson<TournamentDetail>(`/tournaments/${slug}`),
   longevity: (limit = 20) => fetchJson<Longevity>(`/heroes/longevity?limit=${limit}`),
+  skillLeaderboards: (top = 10) =>
+    fetchJson<SkillLeaderboards>(`/heroes/leaderboard/skills?top=${top}`),
+  listContracts: (
+    status: "open" | "claimed" | "fulfilled" | "expired" | "all" = "open",
+    kind?: string,
+    zone?: string,
+  ) => {
+    const qp = new URLSearchParams({ status });
+    if (kind) qp.set("kind", kind);
+    if (zone) qp.set("zone", zone);
+    return fetchJson<Contract[]>(`/contracts?${qp.toString()}`);
+  },
   getHeroByName: (name: string) => fetchJson<Hero>(`/heroes/by-name/${encodeURIComponent(name)}`),
   getMemoryTrace: (id: string) => fetchJson<MemoryTrace>(`/heroes/${id}/memory-trace`),
   listBounties: (status: "open" | "claimed" | "expired" | "all" = "open") =>
@@ -371,4 +403,31 @@ export type Bounty = {
   created_at_tick: number;
   claimed_by_hero_id: string | null;
   claimed_at_tick: number | null;
+};
+
+export type ContractKind =
+  | "bounty"
+  | "assassination"
+  | "defense"
+  | "delivery"
+  | "escort"
+  | "caravan";
+
+export type Contract = {
+  id: string;
+  kind: ContractKind;
+  poster_hero_id: string | null;
+  poster_name: string;
+  target_hero_id: string | null;
+  target_ref: string | null;
+  reward_gold: number;
+  status: "open" | "claimed" | "fulfilled" | "expired";
+  zone_scope: string | null;
+  reason: string;
+  terms: Record<string, any>;
+  created_at_tick: number;
+  expires_at_tick: number | null;
+  claimed_by_hero_id: string | null;
+  claimed_at_tick: number | null;
+  fulfilled_at_tick: number | null;
 };

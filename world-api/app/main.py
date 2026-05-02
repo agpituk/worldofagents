@@ -15,6 +15,7 @@ from app.core.database import SessionLocal
 from app.core import models  # noqa: F401  (register all models so the registry is populated)
 from app.core.tick import tick_engine
 from app.domains.bounty import router as bounty_router
+from app.domains.contract import router as contract_router
 from app.domains.hero import router as hero_router
 from app.domains.highlight import router as highlight_router
 from app.domains.item import router as item_router
@@ -102,5 +103,6 @@ app.include_router(item_router)
 app.include_router(recipe_router)
 app.include_router(tournament_router)
 app.include_router(bounty_router)
+app.include_router(contract_router)
 app.include_router(world_event_router)
 app.include_router(highlight_router)

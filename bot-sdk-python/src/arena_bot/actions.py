@@ -207,12 +207,15 @@ def unequip(slot: str) -> dict[str, Any]:
 
 
 def gather() -> dict[str, Any]:
-    """Gather from a resource node on your current tile.
+    """Gather a non-fish resource (ore, herb, log) from a node on your tile.
 
-    Use when `visible_resources` contains an entry whose `pos` matches yours.
-    Each gather yields one raw material into your inventory and grants
-    +1 XP in the node's skill (usually `gathering`). Nodes deplete after
-    use and respawn after a fixed number of ticks.
+    Use when `visible_resources` contains a non-fishing-hole entry whose
+    `pos` matches yours. Each gather yields one raw material into your
+    inventory and grants +1 XP in the node's `skill_required`
+    (`mining` / `herbalism` / `lumberjacking`). Nodes deplete after use
+    and respawn after a fixed number of ticks.
+
+    For fishing holes, use `fish()` instead.
 
     Args:
         (none) — the node at your tile is gathered automatically.
@@ -220,19 +223,34 @@ def gather() -> dict[str, Any]:
     return {"do": "gather"}
 
 
+def fish() -> dict[str, Any]:
+    """Fish from a fishing hole on your current tile.
+
+    Use when `visible_resources` contains a `fishing_hole` entry whose
+    `pos` matches yours. Each fish yields one raw fish and grants +1 XP
+    in `fishing`. Holes deplete and respawn like other nodes.
+
+    Args:
+        (none) — the fishing hole at your tile is fished automatically.
+    """
+    return {"do": "fish"}
+
+
 def craft(recipe: str) -> dict[str, Any]:
     """Craft a known recipe at an adjacent workstation.
 
     Look up `recipe` in the public recipe list. You must:
       • be adjacent (manhattan ≤ 1) to a workstation NPC of the recipe's
-        `workstation_kind` (e.g., a `forge_workstation` for blacksmith
-        recipes)
+        `workstation_kind` (e.g., a `forge_workstation` for smithing,
+        `alchemy_workstation` for alchemy, `loom_workstation` for
+        tailoring, etc.)
       • have all `inputs` in your inventory (correct slug + count)
       • meet the `skill_min` for the recipe's `skill_required`
 
     On success, the inputs are consumed from your inventory and the output
     item is created and placed in your inventory. +2 XP in the recipe's
-    skill (usually `crafting`).
+    `skill_required` (e.g. `smithing`, `alchemy`, `cooking`, `carpentry`,
+    `tailoring`, `scribe`, `tinkering`).
 
     Args:
         recipe: The slug of the recipe to craft (e.g., "iron_sword_recipe").
@@ -545,6 +563,74 @@ def wait() -> dict[str, Any]:
     return {"do": "wait"}
 
 
+def post_contract(
+    kind: str,
+    reward: int,
+    target: str | None = None,
+    zone: str | None = None,
+    ttl: int | None = None,
+    reason: str = "",
+    terms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Post a contract to the labor market.
+
+    Phase 4 of the world's economy layer. Six kinds:
+      • `bounty`        — kill the named hero, paid to whoever lands the blow.
+      • `assassination` — kill the named hero, but only inside `zone`.
+      • `defense`       — your zone, your tile. Claimer kills hostiles
+                          adjacent to you for the contract's window;
+                          set `terms={"duration_ticks": 20}` to tune.
+      • `delivery`      — send an item to a named NPC in a destination zone.
+                          Set `terms={"item": "<slug>", "dest_zone": "<zone>",
+                          "dest_npc": "<slug>", "qty": 1}`.
+      • `escort`        — be followed by your claimer between two zones.
+                          Set `terms={"from_zone": "...", "to_zone": "...",
+                          "follow_radius": 3, "duration_ticks": 30}`.
+                          Auto-pay is not yet implemented; use cancel.
+      • `caravan`       — like delivery but the item is heavy and (TODO)
+                          drops on the carrier's death.
+
+    Reward is escrowed up front from your gold. Refunded on cancel/expire.
+    """
+    action: dict[str, Any] = {
+        "do": "post_contract",
+        "kind": kind,
+        "reward": reward,
+        "reason": reason,
+    }
+    if target is not None:
+        action["target"] = target
+    if zone is not None:
+        action["zone"] = zone
+    if ttl is not None:
+        action["ttl"] = ttl
+    if terms is not None:
+        action["terms"] = terms
+    return action
+
+
+def claim_contract(contract_id: str) -> dict[str, Any]:
+    """Take a contract that needs an explicit claimer (defense, delivery,
+    escort, caravan). Bounty / assassination cannot be claimed — they
+    auto-resolve on the qualifying kill.
+
+    Args:
+        contract_id: The UUID of the contract to claim. Look one up in
+            `open_contracts_in_zone` from your perception payload.
+    """
+    return {"do": "claim_contract", "contract_id": contract_id}
+
+
+def cancel_contract(contract_id: str) -> dict[str, Any]:
+    """Cancel a contract you posted. The escrowed reward refunds to you.
+
+    Args:
+        contract_id: The UUID of one of your own contracts (must appear
+            in `my_contracts`). Status must be open or claimed.
+    """
+    return {"do": "cancel_contract", "contract_id": contract_id}
+
+
 def post_bounty(target: str, gold: int, reason: str = "") -> dict[str, Any]:
     """Place a public hit on another hero. The gold is paid up front; if any
     hero (other than you) lands the killing blow on the target, they collect
@@ -586,10 +672,11 @@ DEFAULT_TOOLS = [
     move, travel,
     say,
     give, pickup, drop, equip, unequip,
-    gather, craft, buy, sell, cast, learn, steal,
+    gather, fish, craft, buy, sell, cast, learn, steal,
     tame, accept_quest, claim_reward, journal_write, recall,
     store, withdraw, buy_house,
     offer, accept_offer, reject_offer,
     register_tournament, post_bounty,
+    post_contract, claim_contract, cancel_contract,
     examine, look, wait,
 ]
