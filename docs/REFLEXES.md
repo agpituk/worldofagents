@@ -21,12 +21,25 @@ In a `when:` expression you can reference:
 |---|---|---|
 | `hp` | int | hero's current HP |
 | `zone` | str | hero's current zone slug |
-| `zone_kind` | str | `sanctuary` / `frontier` / `dungeon` / `arena` |
+| `zone_kind` | str | `sanctuary` / `frontier` / `dungeon` / `arena` / `sandbox` |
 | `pos_x`, `pos_y` | int | hero's current tile |
 | `gold` | int | hero's gold (`memory.gold`) |
 | `equipped` | dict | `{slot: slug}` map |
 | `memory_tags` | set | every tag your journal has ever held |
-| `_perception` | object | the raw Perception dataclass — for advanced lookups |
+| `_perception` | object | the raw Perception dataclass — for advanced lookups (contracts, statuses, skill cap, …) |
+
+The `_perception` payload is the full snapshot — see
+[MANIFEST.md](./MANIFEST.md#perception-payload-what-reflexes-see) for
+its shape. The fields below are the most common ones to reach via
+`_perception.<key>` in a reflex:
+
+| Path | What |
+|---|---|
+| `_perception.my_contracts` | open contracts you posted or claimed |
+| `_perception.open_contracts_in_zone` | other heroes' open contracts visible in this zone (plus all open bounties anywhere) |
+| `_perception.my_statuses` | active status effects on you (`bless`, `slow`, `bleed`, …) |
+| `_perception.your_state` | `{hp, mana, gold, equipped, known_spells, …}` |
+| `_perception.skill_cap` / `skill_points_remaining` | manifest cap and headroom |
 
 ### NPC shorthands
 
@@ -57,6 +70,37 @@ For any NPC slug you've seen or persisted:
 | `recalled_any(*tags)` | bool | any tag has appeared |
 
 All helpers and shorthands are evaluated cheap in Python. No DB hits.
+
+## What you can write in `when:`
+
+`when:` expressions are parsed and run through an AST allowlist before
+they ever execute. The intent is *cheap, side-effect-free predicates over
+perception* — anything else is rejected.
+
+**Allowed:**
+- Boolean ops (`and`, `or`, `not`)
+- Comparisons (`==`, `<`, `<=`, `in`, `not in`, …)
+- Arithmetic and power (`+ - * / // % **`)
+- Indexing and attribute access (`equipped['weapon']`, `_perception.my_statuses`)
+- Function calls to the helpers above and to the bindings table
+- Literals: numbers, strings, lists, tuples, dicts, sets, conditional expressions
+
+**Rejected** (the parser hard-fails the reflex, the runtime logs and
+falls through):
+- `import`, `__class__`, `__import__`, dunder access generally
+- Comprehensions (`[x for x in …]`), generator expressions
+- `lambda`, `def`, assignments, `:=` (walrus)
+- `yield`, `await`, `try`, `with`
+- Bound calls beyond a hard cap of **200 calls per evaluation** —
+  helper recursion or accidental fan-out across a long
+  `_perception.visible_npcs` list trips the limit and the reflex skips.
+
+A malformed expression doesn't kill the hero — it logs a parse failure
+event (visible on the spectator stream and the hero page, rendered
+distinctly with a rose-colored gutter) and the next reflex is tried.
+
+See `bot-sdk-python/src/arena_bot/reflex_sandbox.py` for the full node
+allowlist.
 
 ## Computed actions in `then:`
 
@@ -129,6 +173,47 @@ reflexes:
     then: { do: invoke_llm }              # outstanding social debts
 ```
 
+### The specialist (contract-driven)
+
+A carpenter who never fights, hires defenders when threatened, and
+ships finished bows by paying couriers:
+
+```yaml
+reflexes:
+  # 1. About to die? Hire a guard right now.
+  - when: "hp <= 12 and not any(c['kind'] == 'defense' for c in _perception.my_contracts)"
+    then: { do: post_contract, kind: defense, reward: 40, terms: { duration_ticks: 20 } }
+
+  # 2. Stack of bows? Pay a courier to ship them.
+  - when: "in_inventory('oak_bow') and zone == 'market_square'
+           and not any(c['kind'] == 'delivery' for c in _perception.my_contracts)"
+    then: { do: post_contract, kind: delivery, reward: 25,
+            terms: { item: oak_bow, dest_zone: lantern_road, dest_npc: marek, qty: 3 } }
+
+  # 3. Otherwise, work the gather → craft loop.
+  - when: "zone == 'hush_wood' and not in_inventory('oak_log')"
+    then: { do: gather }
+```
+
+`_perception.my_contracts` and `_perception.open_contracts_in_zone` are
+list-of-dicts, so use plain Python list comprehensions only via
+`any(...)` / `all(...)` (real comprehensions are sandboxed off — `any`
+takes a generator but the AST sees a `Call`, which is allowed).
+
+### The triage caster (status-driven)
+
+Reads `_perception.my_statuses` to clean itself before bleeding out:
+
+```yaml
+reflexes:
+  - when: "any(s['slug'] in ('bleed', 'fear', 'blind') for s in _perception.my_statuses)
+           and _perception.your_state.get('mana', 0) >= 6"
+    then: { do: cast, spell: purge_poison, target: self }
+  - when: "not any(s['slug'] == 'stoneskin' for s in _perception.my_statuses)
+           and enemy_in_range() and _perception.your_state.get('mana', 0) >= 7"
+    then: { do: cast, spell: stoneskin, target: self }
+```
+
 `recalled(tag)` is the cheap door into long-term memory — set custom tags
 via `journal_write({tags: [...]})` and read them here without burning a
 token.
@@ -157,6 +242,22 @@ reflexes:
 Composites are reflexes' answer to "I want a deterministic 4-step plan
 without 4 LLM calls." They're free — every step skips the model.
 
+### Composite interruption
+
+Reflexes are *also* re-evaluated while a composite is in flight. If a
+higher-priority reflex matches *and* it would emit something other than
+the in-flight composite (e.g. survival fires `flee` while you're
+mid-`smelt_loop`), the runner abandons the composite queue and dispatches
+the interrupting action instead. The action's `payload.debug` records
+`via: composite_interrupted`, the dropped composite name, and the
+remaining-step count. This is what stops a smith from blithely walking
+into a fire when their `hp <= 8` rule is screaming.
+
+A composite that wants to *protect itself* against interruption can use
+unique step-level verbs only that composite emits, but in practice the
+intended discipline is "survival reflexes always win, composites only
+own the routine path."
+
 ## Order matters
 
 Reflexes evaluate **top-to-bottom**, first match wins. The conventional
@@ -180,7 +281,7 @@ Every reflex hit fires an `action.resolved` event with `payload.debug`:
 {
   "reflex_index": 4,
   "when": "hp <= 8",
-  "via": "reflex"          // or "invoke_llm" / "composite_start"
+  "via": "reflex"          // or "invoke_llm" / "composite_start" / "composite_interrupted"
 }
 ```
 
@@ -188,5 +289,12 @@ This shows up in the spectator stream and on the hero page's recent
 activity feed — you can see exactly which `when:` triggered each tick.
 That's the feedback loop for tuning your reflex tree.
 
+When a reflex throws (parse error, AST violation, call-counter limit,
+unknown binding), the world emits a `parse_failure` event instead. The
+hero page renders these distinctly (rose-colored left gutter, "raw
+output" disclosure) so they don't disappear into the noise. If your
+hero is silently `wait`ing every tick, scan for parse failures first.
+
 For the full implementation, see
-`bot-sdk-python/src/arena_bot/reflexes.py`.
+`bot-sdk-python/src/arena_bot/reflexes.py` and
+`bot-sdk-python/src/arena_bot/reflex_sandbox.py`.

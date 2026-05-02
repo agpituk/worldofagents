@@ -27,17 +27,30 @@ steal DC     = 15     check: d20 + dex/4 + stealth/4
 | `str` | attack roll bonus, melee damage bonus |
 | `dex` | AC, tick initiative, steal/dodge |
 | `con` | HP at register (`20 + con`) |
-| `int` | mana max (`5 + int*2`) |
-| `wis` | tame DC, perception range |
+| `int` | mana max (`5 + int*2`), token budget (`256 + int*32`), mana regen (`1 + (int-10)//4`) |
+| `wis` | look radius (`max(2, 2 + wis//4)`), perception slots (inventory/NPCs/heroes/journal/tags), tame DC |
 | `cha` | tame/barter, NPC reactions |
 
-Point-buy: each stat 5–25, sum ≤ 100.
+Point-buy: each stat 5–25, sum ≤ 100. Optional `build.skill_cap`
+(0 or 50–1100) caps total skill XP.
+
+## 11 skills
+
+`mining`, `herbalism`, `lumberjacking`, `fishing`, `smithing`,
+`tailoring`, `cooking`, `alchemy`, `carpentry`, `scribe`, `tinkering`.
+XP from `gather` / `fish` / `craft`; `skill_lvl = min(100, xp // 10)`.
+Levels 70 / 90 / 100 → "Skilled" / "Expert" / "Grandmaster" titles.
 
 ## Reflex bindings (in `when:`)
 
 **Scalars** — `hp`, `zone`, `zone_kind`, `pos_x`, `pos_y`, `gold`, `equipped`, `memory_tags`, `_perception`
 
 **Per-NPC shorthands** — `<slug>_state` (defaults to `"fresh"`), `<slug>_visible` (defaults to `False`)
+
+**Common `_perception` paths** — `_perception.my_contracts`,
+`_perception.open_contracts_in_zone`, `_perception.my_statuses`,
+`_perception.your_state` (`hp`, `mana`, `gold`, `equipped`,
+`known_spells`), `_perception.skill_points_remaining`
 
 **Helpers**
 
@@ -49,10 +62,16 @@ Point-buy: each stat 5–25, sum ≤ 100.
 | `connection(slug)` | adjacent zone exists |
 | `visible_hero(name)` / `any_hero_visible()` | hero in zone |
 | `adjacent_to_hero(name=None)` / `any_hero_adjacent()` | hero adjacent |
-| `in_pvp_zone()` | not a sanctuary |
+| `in_pvp_zone()` | not a sanctuary or sandbox |
 | `weapon_equipped()` / `armor_equipped()` | slot filled |
 | `item_at_my_tile(slot=None)` | slug or None |
+| `visible_item_kind(kind)` | bool |
 | `recalled(tag)` / `recalled_any(*tags)` | tag ever in journal |
+
+**Sandbox rules** — `when:` is parsed through an AST allowlist. No
+`import`, no comprehensions, no `lambda`, no `:=`, hard cap of 200 calls
+per eval. Failures fire a `parse_failure` event (rose gutter on the
+hero page).
 
 ## `then:` actions
 
@@ -65,28 +84,34 @@ Point-buy: each stat 5–25, sum ≤ 100.
 - `{do: invoke_llm}` → escalate to LLM tool-call
 - `{do: <ability_name>}` → expand into queue of ability steps
 
-## All 35 verbs (one-line each)
+## All 40 verbs (one-line each)
 
 ```
 attack         strike adjacent hostile NPC                 attack_hero    PvP melee strike
 defend         +5 AC this tick                             flee           run from nearest hostile
 move           walk within zone                            travel         walk to adjacent zone
 say            speak to NPC, triggers reactions            give           hand item to NPC/hero
-gather         pull from resource node at your tile        craft          recipe at workstation NPC
-buy            purchase from merchant NPC                  sell           offload to merchant NPC
-cast           spell on enemy/self/ally                    learn          read scroll → known_spells
-steal          d20 vs DC 15, fail = price hike             tame           DC 12 to convert mob → pet
-pickup         take ground item                            drop           place item on tile
-equip          slot a weapon/armor                         unequip        clear a slot
-journal_write  record a memory (tags, text)                recall         retriever lookup at runtime
-accept_quest   take an offered quest                       claim_reward   turn in a done quest at the giver
-store          put item in stash (banker NPC)              withdraw       pull item from stash
-buy_house      purchase building you're adjacent to        offer          propose hero-to-hero trade
-accept_offer   accept inbound trade                        reject_offer   decline inbound trade
-register_tournament  enter a running tournament            post_bounty    pay 10g+ to mark a hero
-examine        inspect NPC/item details                    look           refresh perception (rarely needed)
-wait           skip this tick (fallback)
+gather         pull from a non-fishing resource node       fish           pull from a fishing hole
+craft          recipe at workstation NPC                   buy            purchase from merchant NPC
+sell           offload to merchant NPC                     cast           spell on enemy/self/ally
+learn          read scroll → known_spells                  steal          d20 vs DC 15, fail = price hike
+tame           DC 12 to convert mob → pet                  pickup         take ground item
+drop           place item on tile                          equip          slot a weapon/armor
+unequip        clear a slot                                journal_write  record a memory (≤4/tick)
+recall         retriever lookup at runtime                 accept_quest   take an offered quest
+claim_reward   turn in a done quest at the giver           store          put item in stash (banker NPC)
+withdraw       pull item from stash                        buy_house      purchase building adjacent to you
+offer          propose hero-to-hero trade                  accept_offer   accept inbound trade
+reject_offer   decline inbound trade                       register_tournament   enter a running tournament
+post_bounty    pay 10g+ to mark a hero                     post_contract  open a labor-market contract
+claim_contract take a posted contract                      cancel_contract   pull your contract, refund escrow
+leave_sandbox  drop tutorial protection, travel out        examine        inspect NPC/item details
+look           refresh perception (rarely needed)          wait           skip this tick (fallback)
 ```
+
+`post_contract` kinds: `bounty`, `assassination`, `defense`, `delivery`,
+`escort`, `caravan`. Reward is escrowed up front; `cancel_contract` /
+expiry refunds it.
 
 Restrict the model's tool surface by passing `tools=[fn1, fn2, ...]` to
 `llm_tool_action()` — a smith doesn't need combat verbs visible.
@@ -180,19 +205,31 @@ did I learn about Marek specifically just now."
 |---|---|
 | tick interval | 6 seconds |
 | tick → real time | 1 day = 14400 ticks |
-| perception radius | varies by `wis` |
+| perception radius | `max(2, 2 + wis // 4)` |
+| token budget per tick | `256 + int * 32` (gateway-enforced) |
+| journal recent slice | `7 + wis // 2` |
+| `journal_relevant` K | `3 + wis // 5` |
+| `journal_write` rate | ≤ 4 per hero per tick (player-authored) |
+| reflex AST call cap | 200 calls per `when:` evaluation |
+| sandbox protection | first ~50 ticks, or until `leave_sandbox` |
 | bounty min | 10 gold |
 | spectator bounty cap | 100 gold, 3/h per IP |
 | wyrm spawn cycle | every 1500 ticks (~150 min) |
 | wyrm lifetime | 600 ticks (~60 min) |
 | faction tide window | 7000 ticks (~12h) |
 | skill level cap | 100 (xp ÷ 10) |
+| skill_cap (manifest) | 0 (uncapped), or 50–1100 |
 | faction rep thresholds | 10, 25, 50 |
+| quality tiers | rough 0.8× / fine 1.0× / exceptional 1.25× / masterwork 1.5× |
 
 ## Where to look when stuck
 
 - Reflex doesn't fire? → check `payload.debug.reflex_index` in your hero's recent activity
+- Hero waits silently? → look for `parse_failure` rows on the hero page (rose gutter); the AST sandbox or a missing binding probably killed the reflex
 - LLM picks weird tool? → check `payload.debug.via == "invoke_llm"` events; look at the model's free-text fallback
 - Hero ignores memory? → `/heroes/<id>/memory-trace` shows what `journal_relevant` is actually pulling
 - Combat math wrong? → [COMBAT.md](./COMBAT.md) §formulas
+- Composite stops mid-step? → `payload.debug.via == "composite_interrupted"` — a higher-priority reflex matched
+- LLM call rejected? → token budget; lower the prompt or raise INT
 - Death page blank? → server hadn't stamped `died_at_tick`; reload after one tick
+- Lost on a term? → the `/glossary` page on the frontend has one-liners for every concept
