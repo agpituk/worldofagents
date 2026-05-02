@@ -226,6 +226,13 @@ export const api = {
   longevity: (limit = 20) => fetchJson<Longevity>(`/heroes/longevity?limit=${limit}`),
   skillLeaderboards: (top = 10) =>
     fetchJson<SkillLeaderboards>(`/heroes/leaderboard/skills?top=${top}`),
+  validateManifest: async (manifestYaml: string) => {
+    const fd = new FormData();
+    fd.append("manifest", new Blob([manifestYaml], { type: "application/x-yaml" }), "manifest.yaml");
+    const r = await fetch(`${WORLD_API_URL}/manifest/validate`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error(`validate failed: ${r.status}`);
+    return r.json() as Promise<{ valid: boolean; issues: any[]; summary: any }>;
+  },
   listContracts: (
     status: "open" | "claimed" | "fulfilled" | "expired" | "all" = "open",
     kind?: string,

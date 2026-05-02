@@ -1346,6 +1346,10 @@ def _equipped_weapon(db: Session, hero: Hero):
 
 
 def _equipped_armor_bonus(hero: Hero, db: Session) -> int:
+    """Computes the AC contribution of the hero's equipped armor.
+    Phase 7: an armor's quality multiplier scales `ac_bonus`, and a
+    `Reinforced` prefix or `of_warding` suffix piles `ac_bonus_extra`
+    on top. Result is clamped to int (we don't want fractional AC)."""
     eq = hero.equipped if isinstance(hero.equipped, dict) else {}
     slug = eq.get("armor")
     if not slug:
@@ -1356,7 +1360,11 @@ def _equipped_armor_bonus(hero: Hero, db: Session) -> int:
     )
     if armor is None:
         return 0
-    return int((armor.props or {}).get("ac_bonus", 0) or 0)
+    props = armor.props or {}
+    base_ac = int(props.get("ac_bonus", 0) or 0)
+    mult = float(props.get("ac_multiplier", 1.0) or 1.0)
+    extra = int(props.get("ac_bonus_extra", 0) or 0)
+    return int(base_ac * mult) + extra
 
 
 def _resolve_equip(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
@@ -1534,15 +1542,39 @@ def _resolve_craft(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
     for inp in recipe.inputs:
         _consume_from_inventory(db, hero, inp["slug"], int(inp.get("count", 1)))
 
+    # Phase 7 — quality + affixes. The crafter's skill in the recipe's
+    # `skill_required` drives the quality tier, and a small chance of a
+    # prefix/suffix scales with skill so masterworks come out interesting
+    # rather than just numerically bigger. We only roll affixes for items
+    # that have a `slot` (weapons / armor / trinkets) — materials and
+    # consumables stay plain.
+    from app.core.affixes import render_affixed_name, roll_affixes
+    base_props = dict(recipe.output_props or {})
+    is_gear = bool(base_props.get("slot"))
+    crafter_skill_lvl = _skill_level(hero, recipe.skill_required)
+    if is_gear:
+        prefix_chance = 0.0 if crafter_skill_lvl < 50 else min(0.4, (crafter_skill_lvl - 50) / 100.0)
+        suffix_chance = 0.0 if crafter_skill_lvl < 70 else min(0.3, (crafter_skill_lvl - 70) / 100.0)
+        final_props = roll_affixes(
+            base_props,
+            skill_level=crafter_skill_lvl,
+            prefix_chance=prefix_chance,
+            suffix_chance=suffix_chance,
+        )
+        final_name = render_affixed_name(recipe.output_name, final_props)
+    else:
+        final_props = base_props
+        final_name = recipe.output_name
+
     # Produce output and stamp the crafter mark. Crafted items always
     # spawn as a fresh row (no stacking) so the maker's name survives.
     _add_to_inventory(
         db, hero,
         slug=recipe.output_slug,
-        name=recipe.output_name,
+        name=final_name,
         kind=recipe.output_kind,
         description=recipe.output_description,
-        props=dict(recipe.output_props or {}),
+        props=final_props,
         qty=1,
         crafted_by_id=hero.id,
         crafted_by_name=hero.name,
@@ -1932,11 +1964,14 @@ def _resolve_cast(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
                 return ResolutionResult(False, {"verb": "cast", "error": "target out of range"})
             damage = roll(spell.damage_dice) + skill_lvl // 4
             target_hero.hp = max(0, target_hero.hp - damage)
-            killed = target_hero.hp <= 0
-            if killed:
-                target_hero.status = "dead"
-                target_hero.died_at_tick = _current_tick(db)
-                _increment_kills(db, hero, victim_kind="hero")
+            fatal = target_hero.hp <= 0
+            killed = False
+            if fatal:
+                killed = _resolve_hero_death_or_respawn(
+                    db, target_hero, current_tick=_current_tick(db)
+                )
+                if killed:
+                    _increment_kills(db, hero, victim_kind="hero")
             outcome.update(
                 target=target_hero.name, target_kind="hero", damage=damage,
                 target_hp_remaining=target_hero.hp, killed=killed,
@@ -2624,6 +2659,9 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
     if verb == "flee":
         return _resolve_flee(db, hero, action)
 
+    if verb == "leave_sandbox":
+        return _resolve_leave_sandbox(db, hero, action)
+
     return ResolutionResult(
         False,
         {"verb": verb, "error": f"unknown verb '{verb}'", "reason": "unknown_verb"},
@@ -2664,9 +2702,15 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
     # fear -2, sleep -10). NPC targets don't carry hero statuses so AC
     # adjustments only land on PvP targets (handled in attack_hero).
     status_to_hit = _status_modifier(db, hero, kind="to_hit_bonus")
+    # Phase 7 — affix bonuses on the equipped weapon. `to_hit_bonus_extra`
+    # comes from suffixes like `of_the_bear`; `crit_bonus` widens the
+    # crit window from 20 to 19-20 with `keen`.
+    affix_to_hit = int(weapon_props.get("to_hit_bonus_extra", 0) or 0)
+    affix_crit_bonus = int(weapon_props.get("crit_bonus", 0) or 0)
     attack_roll = d20()
-    attack_total = attack_roll + (hero.str_ // 4) + weapon_bonus + skill_bonus + status_to_hit
-    crit = attack_roll == 20
+    attack_total = attack_roll + (hero.str_ // 4) + weapon_bonus + skill_bonus + status_to_hit + affix_to_hit
+    crit_threshold = 20 - affix_crit_bonus
+    crit = attack_roll >= crit_threshold
     fumble = attack_roll == 1
 
     if fumble:
@@ -2690,10 +2734,23 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
             },
         )
 
-    damage = roll(weapon_dice) + (hero.str_ // 4)
+    # Phase 7 — quality multiplier on weapon damage; prefix `flaming` /
+    # `frostbound` adds `extra_damage_dice`; `thirsty` heals on hit.
+    # `of_silver_blood` rolls bonus dice against undead (skeleton/revenant).
+    damage_mult = float(weapon_props.get("damage_multiplier", 1.0) or 1.0)
+    base_damage = roll(weapon_dice) + (hero.str_ // 4)
+    extra_dice = weapon_props.get("extra_damage_dice")
+    extra_damage = roll(str(extra_dice)) if extra_dice else 0
+    undead_bonus_dice = weapon_props.get("undead_bonus_dice")
+    if undead_bonus_dice and target.slug.startswith(("skeleton", "revenant")):
+        extra_damage += roll(str(undead_bonus_dice))
+    damage = int(base_damage * damage_mult) + extra_damage
     if crit:
         damage *= 2
     target.hp_current = max(0, target.hp_current - damage)
+    heal_on_hit = int(weapon_props.get("heal_on_hit", 0) or 0)
+    if heal_on_hit > 0:
+        hero.hp = min(20 + hero.con, hero.hp + heal_on_hit)
     _grant_xp(hero, "melee", 1)
 
     killed = target.hp_current <= 0
@@ -2747,6 +2804,19 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
                 tags=["milestone", "wyrm_slain", "dragon_scale"],
                 dedupe=False,
             )
+        # Phase 7 — slug-keyed loot drops with affixes. The wyrm above
+        # is the v0.x special case; this helper covers revenants
+        # (1-affix weapon drop, named) and brigands (chance of a plain
+        # weapon). Skipped silently for slugs not in the table.
+        loot_drops = _roll_mob_loot_drops(db, hero, target)
+        if loot_drops:
+            for drop in loot_drops:
+                _journal_milestone(
+                    db, hero,
+                    text=f"Looted {drop['name']} from {target.name}.",
+                    tags=["milestone", "loot_drop", drop["slug"]],
+                    dedupe=False,
+                )
         for tpl_slug in completed_quests:
             _journal_milestone(
                 db, hero,
@@ -2777,7 +2847,123 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
     )
 
 
-_SANCTUARY_KINDS = {"sanctuary"}
+_SANCTUARY_KINDS = {"sanctuary", "sandbox"}
+
+
+def _resolve_hero_death_or_respawn(
+    db: Session, victim: Hero, *, current_tick: int
+) -> bool:
+    """Phase 8 — sandbox protection. Heroes inside their protection
+    window OR standing in a sandbox zone respawn at full HP instead of
+    permadying. Returns True if the hero actually died, False if they
+    were rescued.
+
+    This is the single chokepoint for "did this fatal blow stick?" so
+    the three call sites (mob retaliation, attack_hero PvP, cast PvP)
+    share one rule. Bounty / tournament side-effects only fire when
+    True is returned."""
+    zone = db.get(Zone, victim.zone)
+    in_sandbox_zone = zone is not None and zone.kind == "sandbox"
+    in_protection_window = current_tick < int(victim.protected_until_tick or 0)
+    if in_sandbox_zone or in_protection_window:
+        # Respawn — restore HP, leave status alive, leave died_at_tick null.
+        # We log a milestone so spectators see the safety net firing.
+        victim.hp = 20 + victim.con
+        victim.status = "alive"
+        _journal_milestone(
+            db, victim,
+            text="The sandbox caught me before the floor did. Back on my feet.",
+            tags=["milestone", "sandbox_respawn"],
+            dedupe=False,
+        )
+        return False
+    victim.status = "dead"
+    victim.died_at_tick = current_tick
+    return True
+
+
+# Phase 7 — mob loot tables. Each entry is a slug-keyed list of
+# possible drops with chance, item template, and affix-roll knobs. The
+# Wyrm's special drop is kept inline at the kill site (it predates
+# this table); everything else lives here so adding a new drop is one
+# small dict edit. None of this needs new schema — drops spawn through
+# the existing `_add_to_inventory` path with affix-rolled props.
+_MOB_LOOT_TABLE: dict[str, list[dict[str, Any]]] = {
+    "revenant_a": [
+        {
+            "chance": 1.0,
+            "slug": "captain_blade",
+            "name": "Captain's Longsword",
+            "kind": "weapon",
+            "description": "Plain steel kept too well for a corpse. Rim sharp.",
+            "base_props": {"slot": "weapon", "damage_dice": "1d10", "attack_bonus": 1},
+            "force_quality": "exceptional",
+            "prefix_chance": 0.6,
+            "suffix_chance": 0.4,
+        },
+    ],
+    "brigand_a": [
+        {
+            "chance": 0.4,
+            "slug": "brigand_dagger",
+            "name": "Brigand's Dagger",
+            "kind": "weapon",
+            "description": "A worn, balanced dagger with a leather-wrapped grip.",
+            "base_props": {"slot": "weapon", "damage_dice": "1d4", "attack_bonus": 1},
+            "force_quality": "fine",
+            "prefix_chance": 0.15,
+            "suffix_chance": 0.0,
+        },
+    ],
+    "brigand_b": [
+        {
+            "chance": 0.4,
+            "slug": "brigand_dagger",
+            "name": "Brigand's Dagger",
+            "kind": "weapon",
+            "description": "A worn, balanced dagger with a leather-wrapped grip.",
+            "base_props": {"slot": "weapon", "damage_dice": "1d4", "attack_bonus": 1},
+            "force_quality": "fine",
+            "prefix_chance": 0.15,
+            "suffix_chance": 0.0,
+        },
+    ],
+}
+
+
+def _roll_mob_loot_drops(db: Session, hero: Hero, target: NPC) -> list[dict[str, Any]]:
+    """Roll the loot table for `target.slug`. Returns a list of
+    {slug, name} dicts so the caller can emit a journal milestone per
+    drop. Items spawn directly into the killer's inventory."""
+    import random
+    table = _MOB_LOOT_TABLE.get(target.slug, [])
+    if not table:
+        return []
+    from app.core.affixes import render_affixed_name, roll_affixes
+    drops: list[dict[str, Any]] = []
+    for entry in table:
+        if random.random() > entry.get("chance", 1.0):
+            continue
+        base_props = dict(entry.get("base_props") or {})
+        rolled_props = roll_affixes(
+            base_props,
+            skill_level=0,
+            prefix_chance=float(entry.get("prefix_chance", 0.0) or 0.0),
+            suffix_chance=float(entry.get("suffix_chance", 0.0) or 0.0),
+            force_quality=entry.get("force_quality"),
+        )
+        rolled_name = render_affixed_name(entry["name"], rolled_props)
+        _add_to_inventory(
+            db, hero,
+            slug=entry["slug"],
+            name=rolled_name,
+            kind=entry["kind"],
+            description=entry.get("description", ""),
+            props=rolled_props,
+            qty=1,
+        )
+        drops.append({"slug": entry["slug"], "name": rolled_name})
+    return drops
 
 
 def _credit_tournament_kill(db: Session, killer: Hero, victim_zone: str, current_tick: int) -> None:
@@ -2867,11 +3053,12 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
     if crit:
         damage *= 2
     target.hp = max(0, target.hp - damage)
-    killed = target.hp <= 0
+    fatal = target.hp <= 0
+    killed = False
     looted_gold = 0
+    if fatal:
+        killed = _resolve_hero_death_or_respawn(db, target, current_tick=_current_tick(db))
     if killed:
-        target.status = "dead"
-        target.died_at_tick = _current_tick(db)
         _increment_kills(db, hero, victim_kind="hero")
         _credit_tournament_kill(db, hero, hero.zone, _current_tick(db))
         bounty_payouts = _claim_bounties_on_kill(db, hero, target.id, _current_tick(db))
@@ -2891,6 +3078,77 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
         looted_gold=looted_gold,
     )
     return ResolutionResult(True, outcome)
+
+
+def _resolve_leave_sandbox(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    """Manual opt-out from the sandbox tutorial. Drops the hero's
+    `protected_until_tick` to now and travels them to market_square.
+    No-op (with an informative message) when already past the window.
+
+    Phase 8 of the build-diversity roadmap. The auto-eviction in the
+    tick loop handles the "I forgot I was in here" case; this verb
+    handles "I'm ready, let me out."
+    """
+    current = _current_tick(db)
+    if int(hero.protected_until_tick or 0) <= current:
+        return ResolutionResult(
+            False,
+            {"verb": "leave_sandbox", "error": "no active protection — you're already in the open world"},
+        )
+    hero.protected_until_tick = current
+    if hero.zone == "sandbox":
+        # Land at the market_square middle, like a fresh travel.
+        target = db.get(Zone, "market_square")
+        old_zone = hero.zone
+        hero.zone = "market_square"
+        if target is not None:
+            hero.pos_x = target.width // 2
+            hero.pos_y = target.height // 2
+        _journal_milestone(
+            db, hero,
+            text="Stepped out of the Anteroom into Threshold proper.",
+            tags=["milestone", "sandbox_exit"],
+            dedupe=False,
+        )
+        return ResolutionResult(
+            True,
+            {"verb": "leave_sandbox", "from": old_zone, "to": "market_square", "now_at_risk": True},
+        )
+    return ResolutionResult(
+        True,
+        {"verb": "leave_sandbox", "from": hero.zone, "to": hero.zone, "now_at_risk": True},
+    )
+
+
+def _evict_expired_sandbox_heroes(db: Session, current_tick: int) -> int:
+    """Phase 8 — auto-eviction. Heroes whose protection window has
+    lapsed and who are still loitering in the sandbox zone get bumped
+    to market_square. Called once per tick. Returns the count evicted
+    so the spectator stream can log it."""
+    candidates = list(
+        db.scalars(
+            select(Hero).where(
+                Hero.status == "alive",
+                Hero.zone == "sandbox",
+                Hero.protected_until_tick <= current_tick,
+            )
+        )
+    )
+    if not candidates:
+        return 0
+    target = db.get(Zone, "market_square")
+    for h in candidates:
+        h.zone = "market_square"
+        if target is not None:
+            h.pos_x = target.width // 2
+            h.pos_y = target.height // 2
+        _journal_milestone(
+            db, h,
+            text="The Anteroom door clicked behind me. The world is real now.",
+            tags=["milestone", "sandbox_exit", "auto_evicted"],
+            dedupe=False,
+        )
+    return len(candidates)
 
 
 def _resolve_flee(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:

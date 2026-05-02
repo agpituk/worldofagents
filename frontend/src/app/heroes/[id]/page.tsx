@@ -162,12 +162,20 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
           author <span className="text-fg">{hero.author}</span>
         </p>
 
-        <button
-          onClick={copyShareUrl}
-          className="mt-3 text-xs text-amber-dim hover:text-amber border border-border bg-bg-card px-3 py-1"
-        >
-          {copied ? "copied!" : `share /h/${hero.name}`}
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            onClick={copyShareUrl}
+            className="text-xs text-amber-dim hover:text-amber border border-border bg-bg-card px-3 py-1"
+          >
+            {copied ? "copied!" : `share /h/${hero.name}`}
+          </button>
+          <Link
+            href={`/deploy?fork=${hero.id}`}
+            className="text-xs text-emerald-400 hover:text-emerald-300 border border-border bg-bg-card px-3 py-1"
+          >
+            fork this hero
+          </Link>
+        </div>
 
         <div className="mt-6 grid grid-cols-3 gap-2 text-center">
           {Object.entries(hero.build).map(([k, v]) => (

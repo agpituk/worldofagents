@@ -99,6 +99,9 @@ class HeroOut(BaseModel):
     # is null while alive. ticks_alive = (died_at_tick or current_tick) - born_at_tick.
     born_at_tick: int = 0
     died_at_tick: int | None = None
+    # Phase 8 — sandbox protection. While `protected_until_tick > current_tick`,
+    # fatal blows respawn instead of permadying. 0 = no protection.
+    protected_until_tick: int = 0
     # Public manifest — `system` is stripped so the public hero page can show
     # reflexes, build, bio, and composite recipes without leaking the prompt.
     manifest: dict[str, Any] | None = None
@@ -148,6 +151,7 @@ class HeroOut(BaseModel):
             faction_rep=dict(row.faction_rep or {}),
             born_at_tick=int(getattr(row, "born_at_tick", 0) or 0),
             died_at_tick=getattr(row, "died_at_tick", None),
+            protected_until_tick=int(getattr(row, "protected_until_tick", 0) or 0),
             manifest=_redact_manifest(row.manifest),
         )
 

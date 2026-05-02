@@ -185,6 +185,20 @@ def get_memory_trace(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]
     }
 
 
+@router.get("/{hero_id}/perception")
+def get_perception(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]):
+    """Phase 8 — dry-run perception. Returns the JSON payload the LLM
+    would see this tick for this hero. Useful for "why didn't my reflex
+    fire?" debugging — the inputs the agent sees are right there.
+
+    No state is mutated; this is read-only and safe to poll."""
+    from app.core.actions import perception_for
+    hero = HeroService.get_by_id(db, hero_id)
+    if hero is None:
+        raise HTTPException(404, "hero not found")
+    return perception_for(db, hero)
+
+
 @router.get("/{hero_id}/quests")
 def get_quests(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)] = None):
     """All quests for a hero, joined with their template metadata. Used by the

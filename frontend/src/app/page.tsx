@@ -89,6 +89,9 @@ export default function WorldPage() {
           <Link href="/contracts" className="text-emerald-400 hover:text-emerald-300 underline">
             contracts →
           </Link>
+          <Link href="/glossary" className="text-fg-muted hover:text-amber-dim underline">
+            glossary
+          </Link>
         </div>
       </section>
 

@@ -12,6 +12,23 @@ log = logging.getLogger("world.zone.seed")
 
 
 SEED_ZONES: list[dict] = [
+    # ── Sandbox (Phase 8 onboarding) ─────────────────────────────────────
+    # New heroes spawn here under a 50-tick safety net. Death respawns
+    # instead of permakilling; PvP is forbidden. They auto-travel to
+    # market_square once their `protected_until_tick` lapses, or via
+    # the manual `leave_sandbox` verb.
+    {
+        "slug": "sandbox",
+        "name": "The Anteroom",
+        "kind": "sandbox",
+        "width": 8, "height": 8, "capacity_soft": 50,
+        "description": (
+            "A waiting room for new heroes. No permadeath here — fatal "
+            "blows just put you back on your feet. Stay 50 ticks or "
+            "step out into Threshold whenever you're ready."
+        ),
+        "connections": ["market_square"],
+    },
     # ── Threshold proper (sanctuaries) ───────────────────────────────────
     {
         "slug": "market_square",

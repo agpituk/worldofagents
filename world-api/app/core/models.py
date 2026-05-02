@@ -111,6 +111,14 @@ class Hero(Base, TimestampMixin):
     born_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     died_at_tick: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    # Phase 8 — sandbox protection. While `current_tick <
+    # protected_until_tick`, the hero is in a tutorial-grade safety net:
+    # any fatal blow respawns them at full HP instead of stamping
+    # died_at_tick. Default 0 means no protection (the legacy behaviour
+    # for every existing hero). New heroes get `born_at_tick + 50`
+    # unless their manifest opts out via `extras.skip_sandbox: true`.
+    protected_until_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     # Managed mode: when true, the world-api runs the bot loop on the hero's
     # behalf — reflexes, LLM calls, action submissions all happen server-side.
     # When false (legacy), the player runs the bot loop locally via the SDK.

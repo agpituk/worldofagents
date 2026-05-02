@@ -563,6 +563,20 @@ def wait() -> dict[str, Any]:
     return {"do": "wait"}
 
 
+def leave_sandbox() -> dict[str, Any]:
+    """Step out of the sandbox tutorial early.
+
+    Phase 8 of the world's onboarding. New heroes spawn into a
+    no-PvP / no-permadeath zone called the Anteroom for ~50 ticks.
+    Calling this verb drops your protection now and travels you to
+    market_square. After this, fatal blows stick — choose carefully.
+
+    Args:
+        (none)
+    """
+    return {"do": "leave_sandbox"}
+
+
 def post_contract(
     kind: str,
     reward: int,
@@ -678,5 +692,6 @@ DEFAULT_TOOLS = [
     offer, accept_offer, reject_offer,
     register_tournament, post_bounty,
     post_contract, claim_contract, cancel_contract,
+    leave_sandbox,
     examine, look, wait,
 ]
