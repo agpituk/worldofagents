@@ -29,6 +29,53 @@ from app.domains.npc.behaviors import apply_effects, react_to_receive, react_to_
 
 logger = logging.getLogger("world.tick")
 
+# P1-2: bound the per-hero perception build. With sync SQLAlchemy a slow
+# retriever for one hero can stall the read pass for everyone; the
+# watchdog skips the offender and the rest of the world ticks normally.
+PERCEPTION_BUILD_TIMEOUT_SEC = 0.5
+
+
+def _build_perception_payload_sync(
+    *, hero_id_str: str, tick_id: int, recent: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Build one hero's perception payload using a fresh DB session.
+
+    Module-level (not a method) so asyncio.to_thread can pickle it
+    cheaply. Returns None if the hero has died or vanished between
+    the write commit and this read."""
+    with SessionLocal() as db:
+        hero = db.get(Hero, uuid.UUID(hero_id_str))
+        if hero is None or hero.status != "alive":
+            return None
+        hero_recent = [
+            {
+                "kind": e["kind"], "tick_id": e["tick_id"], "zone": e["zone"],
+                "payload": e["payload"],
+                "by_self": e["hero_id"] == hero_id_str,
+            }
+            for e in recent
+            if e["zone"] == hero.zone or e["hero_id"] == hero_id_str
+        ]
+        return {
+            "type": "perception",
+            "tick_id": tick_id,
+            "gateway_permission_token": issue_permission_token(
+                hero_id=str(hero.id), max_tokens=max_tokens_per_tick(hero),
+            ),
+            "your_state": {
+                "id": str(hero.id), "name": hero.name, "hp": hero.hp,
+                "mana": hero.mana_current, "mana_max": hero.mana_max,
+                "zone": hero.zone, "pos": [hero.pos_x, hero.pos_y],
+                "equipped": hero.equipped or {}, "skills": hero.skills or {},
+                "known_spells": list(hero.known_spells or []),
+            },
+            "perception": {
+                **perception_for(db, hero),
+                "recent_events": hero_recent,
+            },
+            "deadline_ms": int(settings.world_tick_seconds * 1000),
+        }
+
 
 class TickEngine:
     def __init__(self) -> None:
@@ -97,6 +144,49 @@ class TickEngine:
 
     def shutdown(self) -> None:
         self.scheduler.shutdown(wait=False)
+
+    # --- parallel perception read pass (P1-2) ------------------------------------
+
+    async def _build_perceptions_parallel(
+        self,
+        *,
+        tick_id: int,
+        alive_ids: list[str],
+        recent: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Run perception_for + payload assembly concurrently per hero.
+
+        Each task takes its own SessionLocal in a worker thread so the
+        sync SQLAlchemy I/O parallelises across the asyncio loop. Per-
+        hero timeout (PERCEPTION_BUILD_TIMEOUT_SEC) bounds the worst
+        case so one slow retriever can't stall the world."""
+
+        async def _one(hero_id_str: str) -> tuple[str, dict[str, Any]] | None:
+            if hero_id_str not in self._connections:
+                return None
+            try:
+                payload = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _build_perception_payload_sync,
+                        hero_id_str=hero_id_str, tick_id=tick_id, recent=recent,
+                    ),
+                    timeout=PERCEPTION_BUILD_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "perception build for %s exceeded %.2fs — skipped this tick",
+                    hero_id_str, PERCEPTION_BUILD_TIMEOUT_SEC,
+                )
+                return None
+            except Exception:
+                logger.exception("perception build raised for %s", hero_id_str)
+                return None
+            if payload is None:
+                return None
+            return hero_id_str, payload
+
+        results = await asyncio.gather(*(_one(h) for h in alive_ids))
+        return dict(r for r in results if r is not None)
 
     # --- the tick itself ----------------------------------------------------------
 
@@ -307,63 +397,42 @@ class TickEngine:
 
             db.commit()
 
-            # Reload heroes (and the recent events) for fresh perception.
-            alive = list(db.scalars(select(Hero).where(Hero.status == "alive")))
-
-            # Pull the just-emitted events so we can fold them into perception.recent_events.
-            recent = list(
-                db.scalars(
+            # Materialise alive hero ids + recent events as plain data
+            # before the session closes — the parallel read pass below
+            # opens its own per-thread sessions, and the spectator
+            # fan-out runs without any session.
+            alive_ids = [str(h.id) for h in db.scalars(
+                select(Hero).where(Hero.status == "alive")
+            )]
+            recent_dicts = [
+                {
+                    "kind": e.kind, "tick_id": e.tick_id, "zone": e.zone,
+                    "payload": e.payload,
+                    "hero_id": str(e.hero_id) if e.hero_id else None,
+                }
+                for e in db.scalars(
                     select(Event)
                     .where(Event.tick_id == tick_id)
                     .order_by(Event.id.desc())
                     .limit(50)
                 )
-            )
+            ]
+            alive_count = len(alive_ids)
 
-            perception_payloads: dict[str, dict[str, Any]] = {}
-            for hero in alive:
-                if str(hero.id) not in self._connections:
-                    continue
-                hero_recent = [
-                    {
-                        "kind": e.kind,
-                        "tick_id": e.tick_id,
-                        "zone": e.zone,
-                        "payload": e.payload,
-                        "by_self": str(e.hero_id) == str(hero.id) if e.hero_id else False,
-                    }
-                    for e in recent
-                    if e.zone == hero.zone or str(e.hero_id) == str(hero.id)
-                ]
-                perception_payloads[str(hero.id)] = {
-                    "type": "perception",
-                    "tick_id": tick_id,
-                    "gateway_permission_token": issue_permission_token(
-                        hero_id=str(hero.id),
-                        max_tokens=max_tokens_per_tick(hero),
-                    ),
-                    "your_state": {
-                        "id": str(hero.id),
-                        "name": hero.name,
-                        "hp": hero.hp,
-                        "mana": hero.mana_current,
-                        "mana_max": hero.mana_max,
-                        "zone": hero.zone,
-                        "pos": [hero.pos_x, hero.pos_y],
-                        "equipped": hero.equipped or {},
-                        "skills": hero.skills or {},
-                        "known_spells": list(hero.known_spells or []),
-                    },
-                    "perception": {
-                        **perception_for(db, hero),
-                        "recent_events": hero_recent,
-                    },
-                    "deadline_ms": int(settings.world_tick_seconds * 1000),
-                }
+        # P1-2 read pass — build perception for every connected alive
+        # hero CONCURRENTLY in worker threads. Each thread takes its own
+        # SessionLocal so a slow retriever for one hero can't stall the
+        # others. The write pass already committed; per-thread reads
+        # see consistent state. Each build is bounded by
+        # PERCEPTION_BUILD_TIMEOUT_SEC; on timeout, the hero is skipped
+        # for this tick and a warning logged.
+        perception_payloads = await self._build_perceptions_parallel(
+            tick_id=tick_id, alive_ids=alive_ids, recent=recent_dicts,
+        )
 
         logger.info(
             "tick %d · %d alive · %d connected · %d resolved",
-            tick_id, len(alive), len(self._connections), resolved_count,
+            tick_id, alive_count, len(self._connections), resolved_count,
         )
 
         for hero_id, payload in perception_payloads.items():
@@ -376,18 +445,18 @@ class TickEngine:
                 logger.warning("dropping perception for %s (queue full)", hero_id)
 
         # Fan out events to spectator subscribers, grouped by zone.
-        for ev in recent:
-            if ev.zone is None:
+        for ev in recent_dicts:
+            if ev["zone"] is None:
                 continue
-            subs = self._zone_subscribers.get(ev.zone)
+            subs = self._zone_subscribers.get(ev["zone"])
             if not subs:
                 continue
             payload = {
-                "tick_id": ev.tick_id,
-                "zone": ev.zone,
-                "kind": ev.kind,
-                "hero_id": str(ev.hero_id) if ev.hero_id else None,
-                "payload": ev.payload,
+                "tick_id": ev["tick_id"],
+                "zone": ev["zone"],
+                "kind": ev["kind"],
+                "hero_id": ev["hero_id"],
+                "payload": ev["payload"],
             }
             for q in subs:
                 try:
