@@ -21,14 +21,24 @@ This plan is the bridge between the spec set (`OVERVIEW.md`, `GRAMMAR.md`,
 
 ## 1. Phase order
 
+**Originally planned**: 2 → 3 → 1 → 4 → 5 → 6.
+
+**Mid-pass revision (Phase 5 now next)**: 2 → 3 → 5 → 6 → 1 (lite) → 4
+(deferred). Reason: Blockly integration (Phase 1 + 4) is honestly 2–3
+weeks of work — block definitions for 44 verbs, YAML round-trip, type-
+slot constraints, Monaco split-pane, server-error → block highlighting
+via stable IDs. Building it well in one delivery pass would crowd out
+the inspector and showcase, which deliver more visible value and
+build directly on the Phase 3 trace events I just shipped.
+
 | Order | Phase | Why this slot |
 |---|---|---|
-| 1 | **Phase 2** — backend composites + docstring overrides | Standalone shippable; unblocks the whole feature group. Pure backend, no UI dependency. |
-| 2 | **Phase 3** — backend override grammar | Same surface as Phase 2; finishing the backend first means the frontend has a stable target. |
-| 3 | **Phase 1** — block editor for existing reflex grammar | Frontend; depends on nothing new. UI win + foundation for Phase 4. |
-| 4 | **Phase 4** — block editor extends to abilities + tools | Layers on Phase 1 + 3. |
-| 5 | **Phase 5** — inspector + debugger | Needs Phase 3 trace events + Phase 4 read-only block render. |
-| 6 | **Phase 6** — showcase | Builds on inspector aggregations. |
+| 1 | **Phase 2** — backend composites + docstring overrides | Done. |
+| 2 | **Phase 3** — backend override grammar | Done. |
+| 3 | **Phase 5** — inspector + debugger | Builds on Phase 3 trace events. Backend endpoints + React components — clean spec, deliverable in pass. |
+| 4 | **Phase 6** — showcase | Builds on Phase 5 aggregations. Backend (alembic + endpoints) + frontend pages. |
+| 5 | **Phase 1 (lite)** — minimal reflex visualization | Hand-rolled React card view of reflexes on `/deploy` and hero pages, plus YAML preview. NO Blockly. Sufficient to show the visual-editor thesis; full Blockly is a separate PR. |
+| — | **Phase 4** — full block editor | Deferred. Tracked as follow-up; ROLLOUT.md and BLOCK_EDITOR.md remain authoritative. |
 
 Phase 0 (grammar freeze) is already done — `GRAMMAR.md` is on `main`.
 
