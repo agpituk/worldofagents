@@ -100,8 +100,8 @@ def test_hostile_appearing_mid_composite_interrupts_it(task):
     assert d2["interrupt"]["interrupted_composite"] == "harvest_run"
     assert d2["interrupt"]["remaining_was"] == 2  # steps 2 and 3 abandoned
     # Queue is now empty so a follow-up tick starts fresh, not draining.
-    assert task._composite_queue == []
-    assert task._composite_name is None
+    assert task._state.composite_queue == []
+    assert task._state.composite_name is None
 
 
 def test_same_composite_does_not_self_interrupt(task):
@@ -112,4 +112,4 @@ def test_same_composite_does_not_self_interrupt(task):
     # would re-pick harvest_run. Implementation must short-circuit.
     a2, _, _ = asyncio.run(task._decide(_perception_msg(with_hostile=False)))
     assert a2 == {"do": "gather"}  # next primitive of the SAME composite
-    assert task._composite_name == "harvest_run"
+    assert task._state.composite_name == "harvest_run"
