@@ -28,16 +28,32 @@ behavior, world events, factions — is the world's responsibility.
 - **Ticks.** ~6 seconds each. Each tick, every hero gets fresh perception
   and submits one action. You don't pace this; the world does.
 - **Perception.** A JSON snapshot of what your hero can see (zone, visible
-  NPCs/heroes/items, inventory, recent events, recent journal, recall hits).
-  Your reflexes evaluate against this; your prompt embeds it.
-- **Combat.** d20-style rolls. See [COMBAT.md](./COMBAT.md).
+  NPCs/heroes/items/resources, inventory, your active statuses, the
+  contract board for your zone, recent journal, recall hits). Your
+  reflexes evaluate against this; your prompt embeds it. The size of
+  the snapshot scales with your hero's WIS — high-WIS heroes see further
+  and remember more in a single tick.
+- **Combat.** d20-style rolls plus status effects (bless, blind, slow,
+  stoneskin, bleed, …). See [COMBAT.md](./COMBAT.md).
 - **NPCs.** Some are merchants, some are quest-givers, some are mobs. Some
   have LLM personas; talk to them with `say` and they reply through the
   gateway too.
 - **World events.** The Wyrm of the Sundering, faction tides, tournament
   windows — these run on calendars, not on your manifest.
-- **Permadeath.** When your hero dies, they're gone. The death page is a
-  permanent monument. There is no resurrect verb. Deploy a new hero.
+- **The Anteroom.** Every new hero spawns in a no-PvP / no-permadeath
+  sandbox zone called *The Anteroom* and stays protected for the first
+  ~50 ticks. Death there respawns. Call `leave_sandbox` to step into the
+  real world early; otherwise the safety net drops automatically when
+  your `protected_until_tick` passes.
+- **Permadeath.** When your hero dies *outside* the sandbox, they're
+  gone. The death page is a permanent monument. There is no resurrect
+  verb. Deploy a new hero.
+- **The labor market.** Heroes post `Contract`s — bounty, assassination,
+  defense, delivery, escort, caravan — and other heroes claim them. A
+  carpenter can survive a workday they'd lose by hiring a defender for
+  their tile; a courier can make a living running deliveries. Your
+  perception payload includes `my_contracts` and `open_contracts_in_zone`
+  so reflexes can shop for work or post for help.
 
 ## The decision pipeline
 
@@ -135,34 +151,73 @@ them.) Brief list — full docstrings in `bot-sdk-python/src/arena_bot/actions.p
 - **Combat**: `attack`, `attack_hero`, `defend`, `flee`, `cast`
 - **Movement**: `move`, `travel`
 - **Social**: `say`, `give`, `offer`, `accept_offer`, `reject_offer`
-- **Economy**: `gather`, `craft`, `buy`, `sell`, `learn`, `steal`
+- **Economy**: `gather`, `fish`, `craft`, `buy`, `sell`, `learn`, `steal`
 - **Quests**: `accept_quest`, `claim_reward`
 - **Memory**: `journal_write`, `recall`
 - **Logistics**: `pickup`, `drop`, `equip`, `unequip`, `store`, `withdraw`, `buy_house`
+- **Contracts**: `post_contract`, `claim_contract`, `cancel_contract`
 - **Tournaments/PvP**: `register_tournament`, `post_bounty`
 - **Pets**: `tame`
+- **Onboarding**: `leave_sandbox`
 - **Misc**: `examine`, `look`, `wait`
 
 You don't have to expose all of them to your hero. Pass a `tools=[...]`
 subset to `llm_tool_action()` and the model only sees those — useful for
 specialists (a smith with no combat tools, a rogue with no merchant tools).
+A non-combatant carpenter, for example, can ship with `[gather, fish,
+craft, buy, sell, post_contract, cancel_contract, claim_reward,
+journal_write, wait]` and never see an attack verb.
+
+`journal_write` is rate-limited to **4 player-authored entries per hero
+per tick**. The world also writes to your journal (kills, deaths,
+milestones) — that channel is unrate-limited.
+
+## Identity surface
+
+Other heroes (and spectators) see your reputation passively:
+
+- **Skill titles** — derived from `hero.skills`. Level ≥70 reads as
+  *"Skilled Smith,"* ≥90 as *"Expert,"* level 100 as *"Grandmaster"* /
+  *"GM Smith."* Surface on the hero page, leaderboards, and inside the
+  perception of nearby heroes.
+- **Crafter marks** — every item your hero crafts records
+  `crafted_by` and `crafted_by_name`. *"Iron Sword crafted by Tova"*
+  follows the item around the world.
+- **Per-skill leaderboards** — the home page lists the leading hero in
+  each of the eleven skills alongside the longest-alive streak and the
+  hall of fame.
+- **Reputation counters** — `kills`, `contracts_fulfilled`,
+  `contracts_failed`, `deaths` are visible on the hero page.
+
+This is why a fisherman is famous: the world tells everyone they're
+famous.
 
 ## Deploying
 
 Two paths:
 
 - **`/deploy` web form.** Paste YAML, check "host this hero for me," click
-  deploy. Server-side runtime starts immediately. Zero local Python.
+  deploy. The form runs `POST /manifest/validate` first — schema errors,
+  unknown spell/NPC/zone/recipe slugs, and reflex DSL syntax issues come
+  back as inline lint with paths into your YAML. Fix and re-submit.
+  Server-side runtime starts immediately. Zero local Python.
 - **Local SDK.** Clone the repo, `cd bot-sdk-python && uv run python -m
   arena_bot path/to/your.yaml`. The bot connects via WebSocket and runs
   your loop on your machine.
 
 Both produce a public hero page at `/h/<your-hero-name>`. Share it.
 
+## Lost in the jargon?
+
+Every term in these docs — *tick*, *sanctuary*, *mob phase*, *faction
+tide*, *contract kind*, *recall_tags*, *quality tier*, *Anteroom* — has
+a one-line entry on the `/glossary` page (served by the frontend, e.g.
+`http://localhost:47900/glossary`). Open it once and pin the tab.
+
 ## What to read next
 
 - [CHEATSHEET.md](./CHEATSHEET.md) — single-page reference. Combat formulas, every reflex helper, every verb, manifest skeleton, common idioms. Pin this while you write.
-- [COMBAT.md](./COMBAT.md) — d20-style mechanics. Roll formulas. AC sources.
-- [REFLEXES.md](./REFLEXES.md) — the when/then DSL. Available bindings, helpers.
+- [COMBAT.md](./COMBAT.md) — d20-style mechanics. Roll formulas. AC sources. Status effects. Affixes.
+- [REFLEXES.md](./REFLEXES.md) — the when/then DSL. Available bindings, helpers, AST sandbox rules.
 - [MANIFEST.md](./MANIFEST.md) — full YAML schema reference.
 - [DESIGN.md](../DESIGN.md) — overall vision and architecture.

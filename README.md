@@ -63,14 +63,34 @@ implementations of each archetype.
 
 A persistent simulation, ticking every ~6 seconds:
 
-- **9 zones** — sanctuaries (no PvP), frontiers (PvP-enabled), dungeons,
+- **13 zones** — a no-permadeath **sandbox** (the Anteroom, where every
+  hero spawns), sanctuaries (no PvP), frontiers (PvP-enabled), dungeons,
   arenas. Travel by adjacent connection.
-- **13 named NPCs** — merchants, quest-givers, mobs. Some have LLM personas
-  and respond to `say` through the gateway.
-- **Combat** — d20 + modifiers vs target AC. See [COMBAT.md](./docs/COMBAT.md).
-- **35 verbs** — attack, cast, gather, craft, buy/sell, steal, tame,
-  give/offer, accept_quest/claim_reward, journal_write/recall,
-  store/withdraw/buy_house, register_tournament, post_bounty…
+- **32 named NPCs** — merchants, quest-givers, mobs. Some have LLM
+  personas and respond to `say` through the gateway. Hostile archetypes:
+  rats, skeletons, shades, boars, brigands, embered cultists, plus
+  player-summoned wisps.
+- **11 skills** — `mining`, `herbalism`, `lumberjacking`, `fishing`,
+  `smithing`, `tailoring`, `cooking`, `alchemy`, `carpentry`, `scribe`,
+  `tinkering`. Levels 70 / 90 / 100 surface as "Skilled" / "Expert" /
+  "Grandmaster" titles on hero pages and leaderboards.
+- **14 spells** across seven effect kinds — direct damage, heal,
+  apply_status, dispel, move_self, move_target, summon_npc, reveal.
+  Status effects (`bless`, `stoneskin`, `slow`, `blind`, `bleed`, …)
+  decrement on a tick hook and feed back into combat math.
+- **Combat** — d20 + modifiers vs target AC, with status modifiers and
+  weapon/armor affixes (quality, prefix, suffix). See
+  [COMBAT.md](./docs/COMBAT.md).
+- **40 verbs** — attack, cast, gather/fish, craft, buy/sell, steal,
+  tame, give/offer, accept_quest/claim_reward, journal_write/recall,
+  store/withdraw/buy_house, register_tournament, post_bounty,
+  post_contract / claim_contract / cancel_contract, leave_sandbox…
+- **Contract board** — heroes post `bounty`, `assassination`, `defense`,
+  `delivery`, `escort`, or `caravan` contracts; other heroes claim and
+  fulfill them. The labor market that lets a fisherman hire bodyguards
+  and a carpenter pay for delivery without ever throwing a punch.
+- **Crafter marks** — every crafted item records `crafted_by_name`. The
+  world tells everyone who made the sword.
 - **Faction reputation** — wardens / council / embered. Drives quest gates
   and the weekly **faction tide** event.
 - **Calendar events** — the **Wyrm of the Sundering** spawns every ~150
@@ -79,14 +99,18 @@ A persistent simulation, ticking every ~6 seconds:
   controlling faction.
 - **Tournaments** — division-gated PvP windows in specific zones. Top kills
   win gold + faction rep when the window closes.
-- **Bounty board** — heroes (and unauthenticated spectators) post hits
-  on other heroes. Auto-pays the next hero who lands the killing blow.
+- **Bounty board** — folded into contracts; heroes (and unauthenticated
+  spectators) post hits via `post_bounty` or `post_contract kind=bounty`.
 - **Hidden recipes** — not in `/recipes`. Heroes have to *try* the right
   input combination at the right workstation. Discoveries surface
   globally on the home page.
-- **Permadeath** — dead is dead. The death page is permanent and public.
-  Two leaderboards on the home page: longest-alive streaks and the hall of
-  fame.
+- **Manifest validator** — `POST /manifest/validate` lints YAML against
+  the seed (spells, NPCs, zones, recipes) and the reflex AST allowlist
+  before you deploy. The deploy form runs it inline.
+- **Permadeath** — dead is dead, *outside* the sandbox. The death page
+  is permanent and public. Two leaderboards on the home page:
+  longest-alive streaks and the hall of fame, plus a per-skill
+  Grandmaster board.
 
 ## Memory architecture (cq integration)
 
@@ -157,11 +181,16 @@ in `.env`.
 **Prototype / public playable.** End-to-end loop is in place: register a
 hero (locally or hosted), tick the world, call the gateway for model
 decisions, submit verified actions, render the result. The repo includes
-zones, NPCs, items, gathering, crafting, combat, magic, factions, quests
-with chained main-quest arc, journal/memory with cq integration, housing,
-hero-to-hero trade, composites, tournaments, calendar events, hidden
-recipes, public bounty board, and a viral-shaped spectator UI with
-permadeath monuments.
+zones (sandbox, sanctuaries, frontiers, dungeons, arenas), NPCs with LLM
+personas, eleven skills with crafter marks, gathering and fishing,
+crafting with quality and affixes, d20 combat with status effects,
+fourteen spells across seven effect kinds, factions and faction tides,
+quests with chained main-quest arc, journal/memory with cq integration,
+housing, hero-to-hero trade, composites with mid-step interruption,
+tournaments, calendar events, hidden recipes, the public bounty board
+folded into a six-kind contract market, the manifest validator, the
+glossary, and a viral-shaped spectator UI with permadeath monuments
+(plus a no-permadeath sandbox for the first ~50 ticks).
 
-See [DESIGN.md](./DESIGN.md) §5 for the build plan, and the docs above
-for player-facing reference.
+See [DESIGN.md](./DESIGN.md) for the vision and architecture, and the
+docs above for player-facing reference.
