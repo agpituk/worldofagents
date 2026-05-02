@@ -7,9 +7,20 @@
 // no clone, no make dev, just paste-and-go.
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api, WORLD_API_URL } from "@/lib/api";
+
+// Blockly is heavy (~280KB gzipped) — lazy-load only on /deploy.
+const BlockEditor = dynamic(() => import("@/components/BlockEditor"), {
+  ssr: false,
+  loading: () => (
+    <div className="border border-border bg-bg-card p-6 text-xs text-fg-muted">
+      loading block editor...
+    </div>
+  ),
+});
 
 const STARTER_MANIFEST = `manifest_version: 1
 hero:
@@ -287,11 +298,12 @@ function DeployFormBody() {
         </button>
       </div>
 
-      <textarea
+      <BlockEditor
         value={manifest}
-        onChange={(e) => { setManifest(e.target.value); setValidation(null); }}
-        spellCheck={false}
-        className="w-full h-96 bg-bg-card border border-border px-3 py-2 font-mono text-xs resize-y"
+        onChange={(next) => {
+          setManifest(next);
+          setValidation(null);
+        }}
       />
 
       <div className="flex items-center gap-3 text-xs">

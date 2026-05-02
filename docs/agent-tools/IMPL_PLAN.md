@@ -519,9 +519,9 @@ Items explicitly outside this pass:
 | 3 — backend override grammar | **shipped** | Sandbox helpers + clamp_table + when/clamp/after middleware + if-step + interpolation + admin/verb-catalog endpoint. 10 sandbox + 15 dispatcher + 6 validator tests. |
 | 5 — inspector + debugger | **shipped** | 3 backend endpoints; ToolListPanel on hero pages; standalone /heroes/[id]/ticks/[tick] page. 6 inspector router tests. |
 | 6 — showcase | **shipped (scope-reduced)** | Alembic migration; tool_definitions/hero_tools/tool_copies; canonicalize.py; 2 live boards (most_copied, best_success), 4 stub boards. /tools and /tools/[toolId] pages. 11 router tests. |
-| 1 — block editor (lite) | **shipped (minimal)** | Tools preview cards on /deploy showing per-tool kind, step/param/clamp counts, descriptions. Surfaces parsed tool structure from the validator response. NO Blockly. |
-| 4 — block editor full | **deferred** | Full Blockly integration spec in BLOCK_EDITOR.md remains the contract for the follow-up PR. |
+| 1 — block editor (lite) | **shipped (minimal)** — superseded by Phase 4 below | Tools preview cards on /deploy showing per-tool kind, step/param/clamp counts, descriptions. Surfaces parsed tool structure from the validator response. NO Blockly. |
+| 1 + 4 — full block editor | **shipped** | Blockly@11 lazy-loaded on /deploy and hero pages. Block kinds for all 44 verbs (auto-generated from VERB_SPECS), reflex/ability/composite/override containers, when_gate/clamp_param/after_chain, if_step (simple + full), arith/min_max/raw_expression. yamlToBlocks/blocksToYaml round-trip with vitest CI assertion (27 tests, including all `bot-sdk-python/examples/*.yaml` manifests). Split-pane Blockly + Monaco YAML editor on /deploy. HeroBlocksRO read-only render on hero pages. |
 
-Final test counts: **127 world-api + 81 SDK = 208 tests passing.**
+Final test counts: **127 world-api + 81 SDK + 27 frontend = 235 tests passing.**
 
 Branches / commits live on `feature/agent-tools` for the user to review whole.

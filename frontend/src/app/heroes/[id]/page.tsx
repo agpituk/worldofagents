@@ -2,10 +2,16 @@
 
 import Link from "next/link";
 import { use, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import yaml from "js-yaml";
 import { api, Hero, JournalEntry, Longevity, MemoryTrace, Quest } from "@/lib/api";
 import { formatLifespan } from "@/lib/format";
 import { useZoneStream } from "@/lib/use-zone-stream";
 import ToolListPanel from "@/components/inspector/ToolListPanel";
+
+// Lazy-load Blockly here too — keeps hero pages light when the user
+// hasn't expanded the blocks panel.
+const HeroBlocksRO = dynamic(() => import("@/components/HeroBlocksRO"), { ssr: false });
 
 export default function HeroPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -461,6 +467,22 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
             </div>
           )}
         </details>
+
+        {/* Read-only block render — shows reflexes/abilities/tools as
+            Blockly blocks, lazy-loaded so the hero page stays light. */}
+        {hero?.manifest && (
+          <details className="mt-6 group">
+            <summary className="text-xs uppercase tracking-wider text-fg-muted cursor-pointer hover:text-amber">
+              blocks (visual)
+            </summary>
+            <div className="mt-3">
+              <HeroBlocksRO
+                yaml={yaml.dump({ hero: hero.manifest })}
+                height={420}
+              />
+            </div>
+          </details>
+        )}
 
         {/* Inspector — Phase 5. Shows the hero's user-defined tools with
             stats and a per-tick "why didn't my tool fire?" deep-link. */}
