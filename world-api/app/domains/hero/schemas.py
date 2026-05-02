@@ -84,6 +84,12 @@ class HeroOut(BaseModel):
     top_title: str | None = None
     # Phase 5 — public reputation counters. {kills, pvp_kills, dead}.
     reputation: dict[str, Any] = Field(default_factory=dict)
+    # Phase 6 — skill cap surface. `skill_cap` is 0 if uncapped (the
+    # default); `skill_points_remaining` is `cap - sum(xp)`, also 0 if
+    # uncapped. Reflex DSL reads these from the perception payload to
+    # plan around forced specialization.
+    skill_cap: int = 0
+    skill_points_remaining: int = 0
     equipped: dict[str, Any] = Field(default_factory=dict)
     mana_current: int = 0
     mana_max: int = 0
@@ -102,6 +108,8 @@ class HeroOut(BaseModel):
         # Imported lazily to avoid an import cycle (actions imports models
         # which transitively imports hero schemas via service).
         from app.core.actions import (
+            _hero_skill_cap,
+            _hero_skill_total,
             _reputation_for,
             skill_titles_for,
             top_title_for,
@@ -110,6 +118,8 @@ class HeroOut(BaseModel):
         skill_levels = {
             name: min(100, int(xp or 0) // 10) for name, xp in skills.items()
         }
+        cap = _hero_skill_cap(row)
+        remaining = max(0, cap - _hero_skill_total(row)) if cap > 0 else 0
         return cls(
             id=row.id,
             name=row.name,
@@ -129,6 +139,8 @@ class HeroOut(BaseModel):
             skill_titles=skill_titles_for(dict(skills)),
             top_title=top_title_for(dict(skills)),
             reputation=_reputation_for(row),
+            skill_cap=cap,
+            skill_points_remaining=remaining,
             equipped=dict(row.equipped or {}),
             mana_current=int(row.mana_current or 0),
             mana_max=int(row.mana_max or 0),

@@ -306,6 +306,47 @@ class Spell(Base):
     heal_dice: Mapped[str] = mapped_column(String(16), nullable=False, default="0d0")
     skill_required: Mapped[str] = mapped_column(String(32), nullable=False, default="magic")
     skill_min: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Phase 2: effect kind drives which handler runs at cast time. The
+    # default `damage_or_heal` keeps the v0.6 spells (firebolt /
+    # frost_lance / mend) on their existing path — pick `apply_status`,
+    # `dispel`, `move_self`, `move_target`, `summon_npc`, or `reveal` to
+    # exercise the new handlers. `payload` is kind-specific JSON
+    # (status slug + duration_ticks for apply_status, mob slug for
+    # summon_npc, etc.).
+    effect_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="damage_or_heal"
+    )
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class Status(Base):
+    """An active status effect on a hero — the durable side-channel that
+    spells use to modify combat without re-targeting on every tick. A
+    Bless raises to-hit; a Stoneskin raises AC; a Slow drops action
+    priority; a Bleed ticks damage. The world tick decrements
+    `expires_at_tick` and removes rows that hit zero.
+
+    `slug` is the effect's identity (e.g. `bless`, `stoneskin`, `slow`,
+    `blind`, `bleed`, `regrowth`). `payload` carries kind-specific
+    numeric tunables (bonus magnitude, damage dice, source caster id)
+    so the same row format covers all status types.
+
+    Multiple stacks of the same slug on the same hero are allowed — the
+    apply path can choose to refresh the longest-running one or stack
+    them. We keep that policy in the spell handler, not the schema.
+    """
+
+    __tablename__ = "statuses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hero_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    slug: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    applied_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    source_hero_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
 
 
 class Item(Base):

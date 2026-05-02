@@ -63,7 +63,7 @@ SEED_ZONES: list[dict] = [
         "kind": "frontier",
         "width": 14, "height": 6, "capacity_soft": 15,
         "description": "Mid-danger road north of Threshold. Bandits have grown bold.",
-        "connections": ["market_square", "hush_wood", "tideway_docks"],
+        "connections": ["market_square", "hush_wood", "tideway_docks", "bandit_camp"],
     },
     {
         "slug": "hush_wood",
@@ -71,7 +71,7 @@ SEED_ZONES: list[dict] = [
         "kind": "frontier",
         "width": 12, "height": 12, "capacity_soft": 15,
         "description": "Old forest. Herbs, low-mid mobs, the occasional druid.",
-        "connections": ["lantern_road"],
+        "connections": ["lantern_road", "mire"],
     },
     {
         "slug": "tideway_docks",
@@ -92,7 +92,42 @@ SEED_ZONES: list[dict] = [
         "kind": "dungeon",
         "width": 8, "height": 8, "capacity_soft": 6,
         "description": "Underground beneath the Underspill. Tutorial dungeon — rats and worse.",
-        "connections": ["embered_shrine"],
+        "connections": ["embered_shrine", "crypt_lower"],
+    },
+    {
+        "slug": "crypt_lower",
+        "name": "The Lower Crypt",
+        "kind": "dungeon",
+        "width": 10, "height": 10, "capacity_soft": 8,
+        "description": (
+            "Deeper than the Cisterns. Old bones in old armour, and worse "
+            "things further in. Bring crushing damage and party support."
+        ),
+        "connections": ["old_cisterns"],
+    },
+    {
+        "slug": "mire",
+        "name": "The Sunken Mire",
+        "kind": "frontier",
+        "width": 12, "height": 12, "capacity_soft": 10,
+        "description": (
+            "Foul ground east of the Hush Wood. Tusked boars churn the muck; "
+            "Embered cultists make pilgrimage here. Cover is sparse; ranged "
+            "kiters thrive."
+        ),
+        "connections": ["hush_wood"],
+    },
+    {
+        "slug": "bandit_camp",
+        "name": "Brigand Camp",
+        "kind": "frontier",
+        "width": 10, "height": 10, "capacity_soft": 10,
+        "description": (
+            "A tarp-and-rope warren on the far side of the Lantern Road. "
+            "Brigands carry stolen tools and coin; some can be bribed, "
+            "some cannot."
+        ),
+        "connections": ["lantern_road"],
     },
 ]
 

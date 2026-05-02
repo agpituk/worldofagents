@@ -23,7 +23,7 @@ from app.core.hero_budgets import (
     perception_token_ceiling,
 )
 from app.core.memory import replace_memory, update_memory
-from app.core.models import Building, Contract, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
+from app.core.models import Building, Contract, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Status, Tournament, TournamentEntry, TradeOffer, Zone
 
 # Per-tick transient state for `defend` — heroes who declared defend get +5 AC for
 # the rest of the tick. The set is keyed by hero_id (str). Cleared each tick
@@ -43,10 +43,191 @@ def _skill_level(hero: Hero, skill: str) -> int:
     return min(100, xp // 10)
 
 
+def _hero_skill_cap(hero: Hero) -> int:
+    """Resolved skill cap for a hero. Order:
+      1. `manifest.build.skill_cap` (per-hero opt-in).
+      2. `manifest.extras.build.skill_cap` (where most authors put build).
+      3. `settings.skill_cap_total_default` (world-wide default; 0 = uncapped).
+    Returns 0 to mean uncapped — that's the behaviour callers expect.
+    """
+    manifest = hero.manifest if isinstance(hero.manifest, dict) else {}
+    for path in ((manifest.get("build") or {}), (manifest.get("extras") or {}).get("build") or {}):
+        if isinstance(path, dict) and "skill_cap" in path:
+            try:
+                v = int(path["skill_cap"])
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                continue
+    from app.core.config import settings as _settings
+    return int(getattr(_settings, "skill_cap_total_default", 0) or 0)
+
+
+def _hero_skill_total(hero: Hero) -> int:
+    """Sum of all XP across all skills. Used for the cap check."""
+    skills = hero.skills if isinstance(hero.skills, dict) else {}
+    total = 0
+    for v in skills.values():
+        try:
+            total += int(v or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def _grant_xp(hero: Hero, skill: str, amount: int) -> None:
+    """Grant `amount` XP into `skill`. If the hero has opted into a skill
+    cap (`manifest.build.skill_cap`) and is at or over that cap, the
+    grant is silently dropped — the verb still resolves, just no XP. We
+    keep this in the helper rather than per-call sites so every grant
+    path (gather/craft/cast/melee/stealth/taming) shares one rule."""
+    cap = _hero_skill_cap(hero)
+    if cap > 0:
+        current_total = _hero_skill_total(hero)
+        if current_total >= cap:
+            return  # at/over cap — drop the grant
+        # Trim grant if it would push us over the cap.
+        if current_total + amount > cap:
+            amount = max(0, cap - current_total)
+        if amount <= 0:
+            return
     skills = dict(hero.skills) if isinstance(hero.skills, dict) else {}
     skills[skill] = int(skills.get(skill, 0) or 0) + amount
     hero.skills = skills
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Status effects
+# ---------------------------------------------------------------------------
+#
+# A Status row carries a slug + payload + expiry. Multiple slugs can be
+# active on a single hero at once. The cast handler writes statuses;
+# the attack/AC/cast handlers read them via `_active_statuses`; the
+# tick engine prunes expired rows and applies per-tick payloads
+# (bleed deals damage, regrowth heals).
+
+# Statuses that read each other to compute combat modifiers. Lookup is
+# constant-time so we keep this as a flat dict.
+#
+#   to_hit_bonus     — added to the d20 attack roll for the affected hero.
+#   ac_bonus         — added to the affected hero's AC when targeted.
+#   stealth          — true while active; reveal effects strip it.
+_STATUS_DEFS: dict[str, dict[str, Any]] = {
+    "bless":     {"to_hit_bonus": 1},
+    "blind":     {"to_hit_bonus": -3},
+    "stoneskin": {"ac_bonus": 4},
+    "haste":     {},  # cosmetic for now (no per-tick speed); LLM-visible
+    "slow":      {},  # cosmetic for now
+    "fear":      {"to_hit_bonus": -2},
+    "sleep":     {"to_hit_bonus": -10, "ac_bonus": -5},  # roughly auto-fail
+    "bleed":     {"per_tick_damage_dice": "1d3"},
+    "regrowth":  {"per_tick_heal_dice": "1d3"},
+    "stealth":   {"stealth": True},
+    "tracking":  {},  # adds a perception line "tracked by <X>"
+}
+
+
+def _apply_status(
+    db: Session, target: Hero, *, slug: str, duration_ticks: int,
+    source_hero_id: uuid.UUID | None, payload: dict[str, Any] | None = None,
+) -> Status:
+    """Add or refresh a status on `target`. If a row with the same slug
+    already exists, extend its `expires_at_tick` to whichever is later
+    (refresh) and merge payload — this keeps reapplied buffs from
+    stacking infinitely while letting a longer cast override a shorter
+    one."""
+    current = _current_tick(db)
+    new_expiry = current + max(1, int(duration_ticks))
+    existing = db.scalar(
+        select(Status).where(Status.hero_id == target.id, Status.slug == slug)
+    )
+    if existing is not None:
+        if existing.expires_at_tick < new_expiry:
+            existing.expires_at_tick = new_expiry
+        if payload:
+            merged = dict(existing.payload or {})
+            merged.update(payload)
+            existing.payload = merged
+        existing.source_hero_id = source_hero_id
+        return existing
+    s = Status(
+        id=uuid.uuid4(),
+        hero_id=target.id,
+        slug=slug,
+        payload=dict(payload or {}),
+        applied_at_tick=current,
+        expires_at_tick=new_expiry,
+        source_hero_id=source_hero_id,
+    )
+    db.add(s)
+    return s
+
+
+def _active_statuses(db: Session, target: Hero) -> list[Status]:
+    """All not-yet-expired statuses on `target`. Note: pruning happens
+    in `tick_statuses`; readers should still filter by expires>now in
+    case a query lands mid-tick (statuses may be ≤current_tick but
+    haven't been pruned yet)."""
+    current = _current_tick(db)
+    return list(
+        db.scalars(
+            select(Status).where(
+                Status.hero_id == target.id,
+                Status.expires_at_tick > current,
+            )
+        )
+    )
+
+
+def _status_modifier(db: Session, target: Hero, *, kind: str) -> int:
+    """Sum the named modifier across all active statuses on `target`.
+    `kind` is one of `to_hit_bonus`, `ac_bonus`. Unknown kinds return 0
+    so callers can read fearlessly."""
+    total = 0
+    for s in _active_statuses(db, target):
+        defn = _STATUS_DEFS.get(s.slug, {})
+        # Payload override beats the default — a powerful caster's
+        # bless can write payload={"to_hit_bonus": 2} and we honor it.
+        v = (s.payload or {}).get(kind, defn.get(kind, 0))
+        if isinstance(v, int):
+            total += v
+    return total
+
+
+def tick_statuses(db: Session, current_tick: int) -> None:
+    """Apply per-tick payloads (bleed/regrowth) and prune expired rows.
+
+    Called from the world tick once per beat, before action resolution
+    so per-tick damage shows up in the same beat the model sees the
+    status. Damage from bleed lands on the target's hp directly; we
+    skip kill paths for now — bleed-out is a v2.x concern."""
+    rows = list(db.scalars(select(Status)))
+    for s in rows:
+        if s.expires_at_tick <= current_tick:
+            db.delete(s)
+            continue
+        defn = _STATUS_DEFS.get(s.slug, {})
+        bleed = (s.payload or {}).get("per_tick_damage_dice") or defn.get("per_tick_damage_dice")
+        heal = (s.payload or {}).get("per_tick_heal_dice") or defn.get("per_tick_heal_dice")
+        if bleed or heal:
+            target = db.get(Hero, s.hero_id)
+            if target is None or target.status != "alive":
+                continue
+            if bleed:
+                target.hp = max(0, target.hp - roll(str(bleed)))
+            if heal:
+                target.hp = min(20 + target.con, target.hp + roll(str(heal)))
+
+
+def _serialize_status(s: Status) -> dict[str, Any]:
+    """Compact form for perception: every active status is surfaced so
+    the LLM can decide what to do about it (eg. cast purge_poison if a
+    bleed is active)."""
+    return {
+        "slug": s.slug,
+        "expires_at_tick": int(s.expires_at_tick),
+        "payload": dict(s.payload or {}),
+    }
 
 
 # Phase 5: skill titles & reputation. These are derived (no schema change)
@@ -1502,6 +1683,169 @@ def _resolve_buy(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionR
     )
 
 
+def _resolve_spell_effect(
+    db: Session, hero: Hero, spell: Spell, action: dict[str, Any],
+    target_arg: Any, skill_lvl: int, outcome: dict[str, Any],
+) -> ResolutionResult:
+    """Phase 2 effect-kind dispatch: apply_status / dispel / move_self /
+    move_target / summon_npc / reveal. Uses the spell's `payload` JSON
+    for kind-specific tunables. Unknown kinds fall through with an
+    error so a misspelled `effect_kind` in the seed is loud, not silent.
+    """
+    payload = dict(spell.payload or {})
+    kind = spell.effect_kind
+
+    def _resolve_target_hero(arg: Any) -> Hero | None:
+        if not arg:
+            return None
+        return db.scalar(select(Hero).where(Hero.name == str(arg)))
+
+    def _check_range(t_pos_x: int, t_pos_y: int) -> bool:
+        return abs(t_pos_x - hero.pos_x) + abs(t_pos_y - hero.pos_y) <= spell.range
+
+    # ── apply_status ───────────────────────────────────────────────────
+    if kind == "apply_status":
+        slug = str(payload.get("status") or "")
+        duration = int(payload.get("duration_ticks") or 10)
+        bonus_payload = dict(payload.get("payload") or {})
+        if not slug:
+            return ResolutionResult(False, {"verb": "cast", "error": "spell missing payload.status"})
+        if spell.target_kind == "self":
+            target = hero
+        elif spell.target_kind == "hero":
+            target = _resolve_target_hero(target_arg)
+            if target is None or target.zone != hero.zone or target.status != "alive":
+                return ResolutionResult(False, {"verb": "cast", "error": "target hero not reachable"})
+            if not _check_range(target.pos_x, target.pos_y):
+                return ResolutionResult(False, {"verb": "cast", "error": "target out of range"})
+        elif spell.target_kind == "enemy":
+            target = _resolve_target_hero(target_arg)
+            if target is None or target.id == hero.id:
+                return ResolutionResult(False, {"verb": "cast", "error": "enemy target not found"})
+            zone = db.get(Zone, hero.zone)
+            if zone is None or zone.kind == "sanctuary":
+                return ResolutionResult(False, {"verb": "cast", "error": "PvP magic forbidden in sanctuary"})
+            if target.zone != hero.zone or not _check_range(target.pos_x, target.pos_y):
+                return ResolutionResult(False, {"verb": "cast", "error": "target out of range"})
+        else:
+            return ResolutionResult(False, {"verb": "cast", "error": f"apply_status target_kind '{spell.target_kind}' not supported"})
+        _apply_status(
+            db, target, slug=slug, duration_ticks=duration,
+            source_hero_id=hero.id, payload=bonus_payload or None,
+        )
+        outcome.update(target=target.name, target_kind="hero", status_applied=slug, duration_ticks=duration)
+
+    # ── dispel ─────────────────────────────────────────────────────────
+    elif kind == "dispel":
+        slugs_to_strip = list(payload.get("slugs") or ["bleed", "blind", "fear", "slow", "sleep"])
+        target = hero if spell.target_kind == "self" else _resolve_target_hero(target_arg)
+        if target is None:
+            return ResolutionResult(False, {"verb": "cast", "error": "target not found"})
+        if target.zone != hero.zone:
+            return ResolutionResult(False, {"verb": "cast", "error": "target not in this zone"})
+        if target.id != hero.id and not _check_range(target.pos_x, target.pos_y):
+            return ResolutionResult(False, {"verb": "cast", "error": "target out of range"})
+        stripped = list(
+            db.scalars(
+                select(Status).where(
+                    Status.hero_id == target.id, Status.slug.in_(slugs_to_strip)
+                )
+            )
+        )
+        for s in stripped:
+            db.delete(s)
+        outcome.update(target=target.name, target_kind="hero", dispelled=[s.slug for s in stripped])
+
+    # ── move_self (blink) ──────────────────────────────────────────────
+    elif kind == "move_self":
+        zone = db.get(Zone, hero.zone)
+        if zone is None:
+            return ResolutionResult(False, {"verb": "cast", "error": "unknown zone"})
+        # target_arg is [x, y] for blink — ranges checked via spell.range.
+        if not (isinstance(target_arg, list) and len(target_arg) == 2):
+            return ResolutionResult(False, {"verb": "cast", "error": "blink target must be [x, y]"})
+        try:
+            tx, ty = int(target_arg[0]), int(target_arg[1])
+        except (TypeError, ValueError):
+            return ResolutionResult(False, {"verb": "cast", "error": "blink coords must be ints"})
+        if not (0 <= tx < zone.width and 0 <= ty < zone.height):
+            return ResolutionResult(False, {"verb": "cast", "error": "blink out of bounds"})
+        if abs(tx - hero.pos_x) + abs(ty - hero.pos_y) > spell.range:
+            return ResolutionResult(False, {"verb": "cast", "error": "blink out of range"})
+        old = (hero.pos_x, hero.pos_y)
+        hero.pos_x, hero.pos_y = tx, ty
+        outcome.update(blinked_from=list(old), blinked_to=[tx, ty])
+
+    # ── move_target (gust / push) ──────────────────────────────────────
+    elif kind == "move_target":
+        target = _resolve_target_hero(target_arg)
+        if target is None or target.zone != hero.zone:
+            return ResolutionResult(False, {"verb": "cast", "error": "target not in this zone"})
+        if not _check_range(target.pos_x, target.pos_y):
+            return ResolutionResult(False, {"verb": "cast", "error": "target out of range"})
+        push = int(payload.get("push_tiles") or 2)
+        zone = db.get(Zone, target.zone)
+        dx = (target.pos_x - hero.pos_x)
+        dy = (target.pos_y - hero.pos_y)
+        # Push along the dominant axis, capped by zone bounds.
+        if abs(dx) >= abs(dy):
+            step_x = (1 if dx >= 0 else -1) * push
+            new_x = max(0, min((zone.width if zone else 10) - 1, target.pos_x + step_x))
+            new_y = target.pos_y
+        else:
+            step_y = (1 if dy >= 0 else -1) * push
+            new_x = target.pos_x
+            new_y = max(0, min((zone.height if zone else 10) - 1, target.pos_y + step_y))
+        old = (target.pos_x, target.pos_y)
+        target.pos_x, target.pos_y = new_x, new_y
+        outcome.update(target=target.name, target_kind="hero", pushed_from=list(old), pushed_to=[new_x, new_y])
+
+    # ── summon_npc ─────────────────────────────────────────────────────
+    elif kind == "summon_npc":
+        mob_slug_template = str(payload.get("mob") or "summoned_wisp")
+        mob_name = str(payload.get("name") or "Summoned Wisp")
+        mob_hp = int(payload.get("hp") or 1)
+        # Spawn a uniquely-slugged NPC adjacent to the caster.
+        new_slug = f"{mob_slug_template}_{uuid.uuid4().hex[:8]}"
+        adjacent_pos = (hero.pos_x + 1, hero.pos_y)
+        npc = NPC(
+            slug=new_slug, name=mob_name, kind="mob",
+            zone=hero.zone, pos_x=adjacent_pos[0], pos_y=adjacent_pos[1],
+            hp_max=mob_hp, hp_current=mob_hp, ac=8,
+            hostility="peaceful", alive=True, loot_gold=0,
+            tameable=False, tamed_by_hero_id=hero.id,
+        )
+        db.add(npc)
+        outcome.update(summoned_slug=new_slug, summoned_at=list(adjacent_pos))
+
+    # ── reveal ─────────────────────────────────────────────────────────
+    elif kind == "reveal":
+        # Strip stealth from every hero in range.
+        in_range: list[Hero] = []
+        for h in db.scalars(select(Hero).where(Hero.zone == hero.zone, Hero.id != hero.id)):
+            if _check_range(h.pos_x, h.pos_y):
+                in_range.append(h)
+        revealed: list[str] = []
+        for h in in_range:
+            stealth = db.scalar(
+                select(Status).where(Status.hero_id == h.id, Status.slug == "stealth")
+            )
+            if stealth is not None:
+                db.delete(stealth)
+                revealed.append(h.name)
+        outcome.update(revealed=revealed)
+
+    else:
+        return ResolutionResult(False, {"verb": "cast", "error": f"unsupported effect_kind '{kind}'"})
+
+    hero.mana_current -= spell.mana_cost
+    _grant_xp(hero, spell.skill_required, 1)
+    outcome["mana_remaining"] = hero.mana_current
+    outcome["skill_xp"] = int((hero.skills or {}).get(spell.skill_required, 0) or 0)
+    outcome["effect_kind"] = kind
+    return ResolutionResult(True, outcome)
+
+
 def _resolve_cast(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
     """Cast a spell the hero has learned."""
     spell_slug = action.get("spell")
@@ -1532,6 +1876,15 @@ def _resolve_cast(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
         "verb": "cast", "spell": spell.slug, "school": spell.school,
         "mana_cost": spell.mana_cost,
     }
+
+    # Phase 2: spells with a non-default effect_kind dispatch to a
+    # dedicated handler. The default (`damage_or_heal`) keeps the v0.6
+    # damage/heal flow below intact for firebolt/frost_lance/mend.
+    effect_kind = getattr(spell, "effect_kind", "damage_or_heal") or "damage_or_heal"
+    if effect_kind != "damage_or_heal":
+        return _resolve_spell_effect(
+            db, hero, spell, action, target_arg, skill_lvl, outcome,
+        )
 
     if spell.target_kind == "self":
         # Self-heal / self-buff. heal_dice applied to caster's hp.
@@ -2307,8 +2660,12 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
     melee_lvl = _skill_level(hero, "melee")
     skill_bonus = melee_lvl // 4  # +1 attack at level 4, +5 at level 20
 
+    # Phase 2 — to-hit shifts from active statuses (bless +1, blind -3,
+    # fear -2, sleep -10). NPC targets don't carry hero statuses so AC
+    # adjustments only land on PvP targets (handled in attack_hero).
+    status_to_hit = _status_modifier(db, hero, kind="to_hit_bonus")
     attack_roll = d20()
-    attack_total = attack_roll + (hero.str_ // 4) + weapon_bonus + skill_bonus
+    attack_total = attack_roll + (hero.str_ // 4) + weapon_bonus + skill_bonus + status_to_hit
     crit = attack_roll == 20
     fumble = attack_roll == 1
 
@@ -2319,6 +2676,7 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
                 "verb": "attack", "target": target.slug, "roll": attack_roll, "total": attack_total,
                 "ac": target.ac, "hit": False, "crit": False, "fumble": True, "damage": 0,
                 "weapon": weapon.slug if weapon else None, "melee_lvl": melee_lvl,
+                "status_to_hit": status_to_hit,
             },
         )
     hit = crit or attack_total >= target.ac
@@ -2466,12 +2824,21 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
     if abs(target.pos_x - hero.pos_x) + abs(target.pos_y - hero.pos_y) > 1:
         return ResolutionResult(False, {"verb": "attack_hero", "error": "target out of melee range"})
 
+    # Phase 2 — status modifiers on both sides of the roll. The
+    # attacker's bless/blind shifts to-hit; the target's stoneskin
+    # raises AC; sleep tanks both sides of the defender's stats.
+    attacker_to_hit = _status_modifier(db, hero, kind="to_hit_bonus")
+    target_ac_status = _status_modifier(db, target, kind="ac_bonus")
+    target_to_hit_status = _status_modifier(db, target, kind="to_hit_bonus")  # sleep penalty
     attack_roll = d20()
-    attack_total = attack_roll + (hero.str_ // 4)
+    attack_total = attack_roll + (hero.str_ // 4) + attacker_to_hit
     crit = attack_roll == 20
     fumble = attack_roll == 1
 
-    target_ac = 10 + target.dex // 4 + _equipped_armor_bonus(target, db)
+    target_ac = 10 + target.dex // 4 + _equipped_armor_bonus(target, db) + target_ac_status
+    if target_to_hit_status <= -10:
+        # Asleep — caster's roll auto-meets-AC for narrative impact.
+        target_ac = 0
     if str(target.id) in defending_this_tick:
         target_ac += 5
 
@@ -3092,6 +3459,17 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         # of where I am.
         "my_contracts": _my_contracts(db, hero),
         "open_contracts_in_zone": _open_contracts_in_zone(db, hero),
+        # Phase 2 — status effects active on me right now (bless,
+        # stoneskin, slow, blind, bleed, …). Each entry has the slug,
+        # the tick it expires, and any payload. Reflexes can read this
+        # to decide whether to cast purge_poison, blink away, etc.
+        "my_statuses": [_serialize_status(s) for s in _active_statuses(db, hero)],
+        # Phase 6 — skill cap. `skill_cap` is 0 when uncapped; otherwise
+        # `skill_points_remaining = skill_cap - sum(xp)`. Lets a reflex
+        # plan around "do I have room for more melee XP?" without doing
+        # the math itself.
+        "skill_cap": _hero_skill_cap(hero),
+        "skill_points_remaining": (lambda c: max(0, c - _hero_skill_total(hero)) if c > 0 else 0)(_hero_skill_cap(hero)),
         "memory": hero.memory or {},
         "journal_recent": _journal_recent(db, hero, journal_recent_limit(hero)),
         "journal_relevant": _journal_relevant(db, hero, journal_relevant_k(hero)),

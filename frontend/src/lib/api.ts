@@ -107,6 +107,8 @@ export type Hero = {
   skill_titles?: Record<string, string>;
   top_title?: string | null;
   reputation?: { kills?: number; pvp_kills?: number; dead?: boolean };
+  skill_cap?: number;
+  skill_points_remaining?: number;
   equipped?: Record<string, string | null>;
   mana_current?: number;
   mana_max?: number;
