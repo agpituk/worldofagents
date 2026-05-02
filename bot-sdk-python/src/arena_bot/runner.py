@@ -26,6 +26,12 @@ from typing import Any
 import yaml
 
 from arena_bot.client import Decision, Hero, Perception
+from arena_bot.hero_runtime import (
+    HeroDecisionState,
+    decide_one,
+    parse_abilities,
+    parse_persona,
+)
 from arena_bot.reflexes import ReflexEngine
 
 
@@ -50,92 +56,35 @@ class ManifestHero(Hero):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        inner = (manifest or {}).get("hero", manifest or {})
-        self._reflexes = ReflexEngine(inner.get("reflexes") or [])
-        self._bio = inner.get("bio") or ""
-        memory_block = inner.get("memory") or {}
-        memory_init = memory_block.get("initial") or {}
-        self._goal = memory_init.get("goal") or "Survive. Adventure. Make decisions in character."
-        # Durable persona context fed into every LLM prompt — the YAML's
-        # answer to "what does this hero remember about who they are even
-        # when nothing in perception reminds them?"
-        self._system_summary = (memory_block.get("system_summary") or "").strip()
-        models_block = inner.get("models") or {}
-        model_alias = inner.get("model") or "cheap"
-        model_spec = models_block.get(model_alias) if isinstance(models_block, dict) else None
-        self._model_id = (
-            (model_spec or {}).get("model") if isinstance(model_spec, dict) else None
-        ) or "qwen3-4b"
+        manifest = manifest or {}
+        inner = manifest.get("hero") if isinstance(manifest.get("hero"), dict) else manifest
+        self._reflexes = ReflexEngine((inner or {}).get("reflexes") or [])
 
-        # Composite abilities — name → list[primitive action dicts].
-        abilities = inner.get("abilities") or {}
-        self._abilities: dict[str, list[dict[str, Any]]] = {}
-        if isinstance(abilities, dict):
-            for name, spec in abilities.items():
-                if not isinstance(spec, dict):
-                    continue
-                steps = spec.get("steps") or spec.get("decompose") or []
-                if isinstance(steps, list):
-                    self._abilities[str(name)] = [s for s in steps if isinstance(s, dict) and s.get("do")]
-        self._composite_queue: list[dict[str, Any]] = []
-        self._composite_name: str | None = None
+        persona = parse_persona(manifest)
+        self._bio = persona["bio"]
+        self._goal = persona["goal"] or "Survive. Adventure. Make decisions in character."
+        self._system_summary = persona["system_summary"]
+        self._model_id = persona["model_id"]
+
+        self._abilities = parse_abilities(manifest)
+        self._state = HeroDecisionState()
 
     async def decide(self, perception: Perception) -> Decision:
-        # If a composite is in flight, dispatch the next primitive step.
-        if self._composite_queue:
-            step = self._composite_queue.pop(0)
-            debug = {
-                "reflex_index": -1,
-                "via": "composite",
-                "composite": self._composite_name,
-                "remaining": len(self._composite_queue),
-            }
-            if not self._composite_queue:
-                self._composite_name = None
-            return Decision(kind="reflex", action=dict(step), debug=debug)
-
-        action, debug = self._reflexes.evaluate_with_debug(perception)
-        if action is None:
-            return Decision(
-                kind="reflex",
-                action={"do": "wait"},
-                debug={"reflex_index": -1, "note": "no reflex matched"},
-            )
-
-        # Composite expansion: if the action's `do` matches a named ability,
-        # queue its steps and dispatch the first one this tick.
-        if action.get("do") in self._abilities:
-            name = action["do"]
-            steps = list(self._abilities[name])
-            if steps:
-                self._composite_name = name
-                self._composite_queue = steps[1:]
-                first = steps[0]
-                d_debug = {
-                    "reflex_index": (debug or {}).get("reflex_index"),
-                    "when": (debug or {}).get("when"),
-                    "via": "composite_start",
-                    "composite": name,
-                    "remaining": len(self._composite_queue),
-                }
-                return Decision(kind="reflex", action=dict(first), debug=d_debug)
-
-        if action.get("do") == "invoke_llm":
+        async def _on_invoke_llm(p: Perception) -> dict[str, Any]:
             d = await self.llm_tool_action(
-                perception=perception,
-                model=self._model_id,
-                bio=self._bio,
-                goal=self._goal,
-                system_summary=self._system_summary,
+                perception=p, model=self._model_id, bio=self._bio,
+                goal=self._goal, system_summary=self._system_summary,
                 fallback={"do": "wait"},
             )
-            d.debug = {
-                "reflex_index": (debug or {}).get("reflex_index"),
-                "when": (debug or {}).get("when"),
-                "via": "invoke_llm",
-            }
-            return d
-        return Decision(kind="reflex", action=action, debug=debug)
+            return d.action
+
+        action, debug = await decide_one(
+            state=self._state, perception=perception,
+            reflex_engine=self._reflexes, abilities=self._abilities,
+            on_invoke_llm=_on_invoke_llm,
+        )
+        return Decision(kind="llm" if (debug or {}).get("via") == "invoke_llm" else "reflex",
+                        action=action, debug=debug)
 
 
 async def run(manifest_path: str | Path, *, world_url: str, gateway_url: str) -> None:

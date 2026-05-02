@@ -69,8 +69,14 @@ class Hero(Base, TimestampMixin):
     manifest: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     # Mutable runtime memory — quest state, NPC relationships, accumulated knowledge.
-    # Initialized from manifest.memory.initial at registration.
+    # Initialized from manifest.memory.initial at registration. All writes
+    # should go through app.core.memory.update_memory() / replace_memory()
+    # so they emit memory.mutated audit events and are guarded by the
+    # schema-version forward-migration table.
     memory: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    memory_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
     # Skills: per-skill XP totals. Level = min(100, xp // 10). Examples:
     #   {"melee": 12, "gathering": 4, "crafting": 0}

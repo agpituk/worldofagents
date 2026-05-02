@@ -15,5 +15,10 @@ class Settings(BaseSettings):
     # Signed-token lifetime — short-lived; tokens are meant to be consumed in the same tick.
     token_ttl_seconds: int = 60
 
+    # When true, /think rejects requests that don't carry a world-api-signed
+    # permission_token. Off lets old/local callers exercise the gateway
+    # without world-api in the loop (development convenience).
+    require_permission_token: bool = True
+
 
 settings = Settings()

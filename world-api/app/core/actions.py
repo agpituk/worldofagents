@@ -15,6 +15,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.dice import d20, roll
+from app.core.hero_budgets import (
+    journal_recent_limit,
+    journal_relevant_k,
+    look_radius,
+    perception_budget,
+    perception_token_ceiling,
+)
+from app.core.memory import replace_memory, update_memory
 from app.core.models import Bounty, Building, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
 
 # Per-tick transient state for `defend` — heroes who declared defend get +5 AC for
@@ -71,8 +79,17 @@ def _journal_milestone(
     return entry
 
 
+JOURNAL_WRITE_PER_TICK_LIMIT = 4
+
+
 def _resolve_journal_write(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
-    """The hero records their own thought into their journal."""
+    """The hero records their own thought into their journal.
+
+    P2-4: capped at JOURNAL_WRITE_PER_TICK_LIMIT player entries per tick.
+    Without this a misbehaving manifest can spam the table forever; the
+    archival job belongs in a separate change but the rate limit closes
+    the spam vector immediately.
+    """
     text = (action.get("text") or "").strip()
     if not text:
         return ResolutionResult(False, {"verb": "journal_write", "error": "empty text"})
@@ -82,6 +99,26 @@ def _resolve_journal_write(db: Session, hero: Hero, action: dict[str, Any]) -> R
         return ResolutionResult(False, {"verb": "journal_write", "error": "tags must be a list"})
     tags = [str(t)[:32] for t in tags][:8]
     tick_id = _current_tick(db)
+
+    db.flush()  # make sure earlier writes within this tick are visible to count
+    existing_this_tick = db.scalar(
+        select(func.count(JournalEntry.id)).where(
+            JournalEntry.hero_id == hero.id,
+            JournalEntry.tick_id == tick_id,
+            JournalEntry.kind == "player",
+        )
+    ) or 0
+    if existing_this_tick >= JOURNAL_WRITE_PER_TICK_LIMIT:
+        return ResolutionResult(
+            False,
+            {
+                "verb": "journal_write",
+                "error": f"rate limit: max {JOURNAL_WRITE_PER_TICK_LIMIT} player entries per tick",
+                "reason": "journal_rate_limit",
+                "limit": JOURNAL_WRITE_PER_TICK_LIMIT,
+            },
+        )
+
     db.add(JournalEntry(hero_id=hero.id, tick_id=tick_id, kind="player", text=text, tags=tags))
     # Push to the retriever (no-op for SqlRetriever; cq.propose for CqRetriever).
     from app.core.retriever import get_retriever
@@ -186,7 +223,7 @@ def _resolve_buy_house(db: Session, hero: Hero, action: dict[str, Any]) -> Resol
     if gold < b.gold_cost:
         return ResolutionResult(False, {"verb": "buy_house", "error": f"insufficient gold ({gold} < {b.gold_cost})"})
 
-    _set_hero_gold(hero, gold - b.gold_cost)
+    _set_hero_gold(db, hero, gold - b.gold_cost, source="buy_house")
     b.owner_hero_id = hero.id
     _journal_milestone(
         db, hero,
@@ -241,7 +278,7 @@ def _resolve_post_bounty(db: Session, hero: Hero, action: dict[str, Any]) -> Res
 
     # Burn the gold up front. If the bounty is never claimed, gold is
     # effectively destroyed — the player paid for the public threat.
-    _set_hero_gold(hero, _hero_gold(hero) - gold)
+    _set_hero_gold(db, hero, _hero_gold(hero) - gold, source="post_bounty")
 
     bounty = Bounty(
         id=uuid.uuid4(),
@@ -285,7 +322,7 @@ def _claim_bounties_on_kill(db: Session, killer: Hero, victim_id: uuid.UUID, cur
     for b in open_bounties:
         if b.poster_hero_id == killer.id:
             # Self-posted bounty — refund instead of paying out.
-            _set_hero_gold(killer, _hero_gold(killer) + b.gold)
+            _set_hero_gold(db, killer, _hero_gold(killer) + b.gold, source="bounty_refund")
             b.status = "expired"
             continue
         b.status = "claimed"
@@ -294,7 +331,7 @@ def _claim_bounties_on_kill(db: Session, killer: Hero, victim_id: uuid.UUID, cur
         total_payout += b.gold
         payouts.append({"bounty_id": str(b.id), "gold": b.gold, "poster": b.poster_name})
     if total_payout > 0:
-        _set_hero_gold(killer, _hero_gold(killer) + total_payout)
+        _set_hero_gold(db, killer, _hero_gold(killer) + total_payout, source="bounty_claim")
         _journal_milestone(
             db, killer,
             text=f"Claimed {total_payout}g in bounties on {open_bounties[0].target_name}.",
@@ -406,26 +443,45 @@ def _resolve_offer(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
 
 def _resolve_accept_offer(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
     """Accept a pending offer addressed to this hero. Adjacency required at
-    accept time too. Resolves instantly: both sides exchange items + gold."""
+    accept time too. Resolves instantly: both sides exchange items + gold.
+
+    P1-3: lock the offer row + both hero rows for the duration of the
+    handler. On Postgres this serialises concurrent accepts of the same
+    offer; on SQLite it's a no-op (writes already serialise) but the
+    re-check after the lock guards against logic-level TOCTOU regardless.
+    """
     offer_id = action.get("offer_id")
     if not offer_id:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "missing offer_id"})
     try:
-        offer = db.get(TradeOffer, uuid.UUID(str(offer_id)))
+        offer_uuid = uuid.UUID(str(offer_id))
     except ValueError:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "bad offer_id"})
+
+    offer = db.scalar(
+        select(TradeOffer).where(TradeOffer.id == offer_uuid).with_for_update()
+    )
     if offer is None:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "offer not found"})
     if offer.to_hero_id != hero.id:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "not the addressee"})
     if offer.status != "pending":
+        # Re-check inside the lock — by the time we got the row the offer
+        # may already have been accepted, rejected, or expired by another
+        # transaction. Without this check, P1-3's ghost-item duplication
+        # would slip through on Postgres.
         return ResolutionResult(False, {"verb": "accept_offer", "error": f"offer is {offer.status}"})
     current = _current_tick(db)
     if offer.expires_at_tick and current > offer.expires_at_tick:
         offer.status = "expired"
         return ResolutionResult(False, {"verb": "accept_offer", "error": "offer expired"})
 
-    other = db.get(Hero, offer.from_hero_id)
+    # Lock both hero rows so concurrent gold/inventory writes can't
+    # invalidate the balance checks below before we apply the transfer.
+    other = db.scalar(
+        select(Hero).where(Hero.id == offer.from_hero_id).with_for_update()
+    )
+    db.scalar(select(Hero).where(Hero.id == hero.id).with_for_update())
     if other is None or other.zone != hero.zone:
         return ResolutionResult(False, {"verb": "accept_offer", "error": "counterparty not in zone"})
     if abs(other.pos_x - hero.pos_x) + abs(other.pos_y - hero.pos_y) > 1:
@@ -453,8 +509,8 @@ def _resolve_accept_offer(db: Session, hero: Hero, action: dict[str, Any]) -> Re
         _consume_from_inventory(db, other, entry["slug"], entry["qty"])
         _add_to_inventory(db, hero, slug=entry["slug"], name=name, kind=kind, props=props, description=desc, qty=entry["qty"])
     if offer.offered_gold:
-        _set_hero_gold(other, _hero_gold(other) - offer.offered_gold)
-        _set_hero_gold(hero, _hero_gold(hero) + offer.offered_gold)
+        _set_hero_gold(db, other, _hero_gold(other) - offer.offered_gold, source="trade_accept")
+        _set_hero_gold(db, hero, _hero_gold(hero) + offer.offered_gold, source="trade_accept")
 
     for entry in (offer.wanted_items or []):
         stack = _inventory_stack(db, hero, entry["slug"])
@@ -464,8 +520,8 @@ def _resolve_accept_offer(db: Session, hero: Hero, action: dict[str, Any]) -> Re
         _consume_from_inventory(db, hero, entry["slug"], entry["qty"])
         _add_to_inventory(db, other, slug=entry["slug"], name=name, kind=kind, props=props, description=desc, qty=entry["qty"])
     if offer.wanted_gold:
-        _set_hero_gold(hero, _hero_gold(hero) - offer.wanted_gold)
-        _set_hero_gold(other, _hero_gold(other) + offer.wanted_gold)
+        _set_hero_gold(db, hero, _hero_gold(hero) - offer.wanted_gold, source="trade_accept")
+        _set_hero_gold(db, other, _hero_gold(other) + offer.wanted_gold, source="trade_accept")
 
     offer.status = "accepted"
     return ResolutionResult(True, {
@@ -798,12 +854,11 @@ def _resolve_craft(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
     # it once per hero, with a loud milestone the spectator stream picks up.
     discovery: bool = False
     if recipe.hidden:
-        mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
+        mem = hero.memory if isinstance(hero.memory, dict) else {}
         discovered = list(mem.get("discovered_recipes") or [])
         if recipe.slug not in discovered:
             discovered.append(recipe.slug)
-            mem["discovered_recipes"] = discovered
-            hero.memory = mem
+            update_memory(db, hero, source="craft_hidden", discovered_recipes=discovered)
             discovery = True
             _journal_milestone(
                 db, hero,
@@ -837,10 +892,13 @@ def _hero_gold(hero: Hero) -> int:
     return int(mem.get("gold", 0) or 0)
 
 
-def _set_hero_gold(hero: Hero, value: int) -> None:
-    mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-    mem["gold"] = max(0, value)
-    hero.memory = mem
+def _set_hero_gold(db: Session, hero: Hero, value: int, *, source: str) -> None:
+    """Update hero.memory.gold with audit emission (P3-1).
+
+    `source` should name the verb/event causing the change (e.g.
+    'buy_house', 'tournament_prize', 'pvp_loot') so the spectator UI
+    can render gold flows attributed to the action that caused them."""
+    update_memory(db, hero, source=source, gold=max(0, value))
 
 
 def _effective_buy_price(entry: dict) -> int:
@@ -896,7 +954,7 @@ def _resolve_buy(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionR
             False, {"verb": "buy", "error": f"insufficient gold ({gold} < {total_cost})"}
         )
 
-    _set_hero_gold(hero, gold - total_cost)
+    _set_hero_gold(db, hero, gold - total_cost, source="buy")
     _add_to_inventory(
         db, hero,
         slug=entry["slug"],
@@ -984,9 +1042,10 @@ def _resolve_cast(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
                 target_npc.alive = False
                 loot_gold = target_npc.loot_gold
                 if loot_gold > 0:
-                    mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-                    mem["gold"] = int(mem.get("gold", 0) or 0) + loot_gold
-                    hero.memory = mem
+                    _set_hero_gold(
+                        db, hero, _hero_gold(hero) + loot_gold,
+                        source="attack_loot",
+                    )
             outcome.update(
                 target=target_npc.slug, target_kind="npc", damage=damage,
                 target_hp_remaining=target_npc.hp_current, killed=killed, loot_gold=loot_gold,
@@ -1160,7 +1219,7 @@ def _resolve_claim_reward(db: Session, hero: Hero, action: dict[str, Any]) -> Re
 
     quest.status = "claimed"
     if tpl.reward_gold:
-        _set_hero_gold(hero, _hero_gold(hero) + tpl.reward_gold)
+        _set_hero_gold(db, hero, _hero_gold(hero) + tpl.reward_gold, source="quest_reward")
     if tpl.reward_faction and tpl.reward_faction_amount:
         _grant_rep(hero, tpl.reward_faction, tpl.reward_faction_amount, db=db)
     _journal_milestone(
@@ -1263,13 +1322,12 @@ def _resolve_steal(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
         _grant_xp(hero, "stealth", 2)
         outcome["stealth_xp"] = int((hero.skills or {}).get("stealth", 0) or 0)
     else:
-        mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
+        mem = hero.memory if isinstance(hero.memory, dict) else {}
         notes = dict(mem.get("npcs", {}))
         npc_entry = dict(notes.get(npc.slug, {}))
         npc_entry["aware_of_theft"] = True
         notes[npc.slug] = npc_entry
-        mem["npcs"] = notes
-        hero.memory = mem
+        update_memory(db, hero, source="steal_caught", npcs=notes)
         outcome["caught"] = True
 
     # Stealing always carries a faction cost — caught or not, the act is
@@ -1333,7 +1391,7 @@ def _resolve_sell(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
     unit_price = _effective_sell_price(entry)
     payout = unit_price * qty
     _consume_from_inventory(db, hero, item_slug, qty)
-    _set_hero_gold(hero, _hero_gold(hero) + payout)
+    _set_hero_gold(db, hero, _hero_gold(hero) + payout, source="sell")
 
     # Increment merchant's stock if it tracks qty.
     if entry.get("qty") is not None:
@@ -1364,10 +1422,6 @@ class ResolutionResult:
 # ---------------------------------------------------------------------------
 
 
-def _look_radius(hero: Hero) -> int:
-    return max(2, 2 + hero.wis // 4)
-
-
 def _move_speed(hero: Hero) -> int:
     return max(1, 1 + hero.dex // 8)
 
@@ -1377,34 +1431,63 @@ def _move_speed(hero: Hero) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _visible_heroes_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[str, Any]]:
+def _visible_heroes_in_zone(
+    db: Session, hero: Hero, radius: int, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     others = (
         db.query(Hero)
         .filter(Hero.zone == hero.zone, Hero.id != hero.id, Hero.status == "alive")
         .all()
     )
-    out: list[dict[str, Any]] = []
-    for o in others:
-        if abs(o.pos_x - hero.pos_x) + abs(o.pos_y - hero.pos_y) <= radius:
-            out.append({"kind": "hero", "id": str(o.id), "name": o.name, "pos": [o.pos_x, o.pos_y], "hp": o.hp})
-    return out
+    nearby = [
+        o for o in others
+        if abs(o.pos_x - hero.pos_x) + abs(o.pos_y - hero.pos_y) <= radius
+    ]
+    # Closest first; tie-break by hero id so the order is deterministic.
+    nearby.sort(key=lambda o: (
+        abs(o.pos_x - hero.pos_x) + abs(o.pos_y - hero.pos_y),
+        str(o.id),
+    ))
+    if limit is not None:
+        nearby = nearby[:limit]
+    return [
+        {"kind": "hero", "id": str(o.id), "name": o.name, "pos": [o.pos_x, o.pos_y], "hp": o.hp}
+        for o in nearby
+    ]
 
 
-def _visible_npcs_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[str, Any]]:
+# Hostile NPCs sort first so a low-WIS hero in danger still sees the threat
+# rather than wasting their visibility budget on the innkeeper.
+_HOSTILITY_PRIORITY = {"hostile": 0, "tamed": 1, "peaceful": 2}
+
+
+def _visible_npcs_in_zone(
+    db: Session, hero: Hero, radius: int, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     npcs = list(db.scalars(select(NPC).where(NPC.zone == hero.zone, NPC.alive.is_(True))))
-    out: list[dict[str, Any]] = []
-    for n in npcs:
-        if abs(n.pos_x - hero.pos_x) + abs(n.pos_y - hero.pos_y) <= radius:
-            out.append({
-                "kind": "npc",
-                "slug": n.slug,
-                "name": n.name,
-                "pos": [n.pos_x, n.pos_y],
-                "hostility": n.hostility,
-                "hp": n.hp_current,
-                "hp_max": n.hp_max,
-            })
-    return out
+    nearby = [
+        n for n in npcs
+        if abs(n.pos_x - hero.pos_x) + abs(n.pos_y - hero.pos_y) <= radius
+    ]
+    nearby.sort(key=lambda n: (
+        _HOSTILITY_PRIORITY.get(n.hostility, 3),
+        abs(n.pos_x - hero.pos_x) + abs(n.pos_y - hero.pos_y),
+        n.slug,
+    ))
+    if limit is not None:
+        nearby = nearby[:limit]
+    return [
+        {
+            "kind": "npc",
+            "slug": n.slug,
+            "name": n.name,
+            "pos": [n.pos_x, n.pos_y],
+            "hostility": n.hostility,
+            "hp": n.hp_current,
+            "hp_max": n.hp_max,
+        }
+        for n in nearby
+    ]
 
 
 def _visible_items_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[str, Any]]:
@@ -1431,21 +1514,99 @@ def _visible_items_in_zone(db: Session, hero: Hero, radius: int) -> list[dict[st
 
 
 # ---------------------------------------------------------------------------
+# Action shape validation (P2-5)
+# ---------------------------------------------------------------------------
+
+# Per-verb required field types. Suffix "?" = optional. Verbs absent from
+# this map (wait, look, defend, flee, gather, journal_write, …) have no
+# required fields. Unknown verbs are caught downstream with reason=
+# unknown_verb, which is the right place for that mode.
+_VERB_SCHEMAS: dict[str, dict[str, type | tuple[type, ...]]] = {
+    "attack": {"target": str},
+    "attack_hero": {"target": str},
+    "move": {"target": (list, tuple)},
+    "travel": {"zone": str},
+    "say": {"message": str},
+    "give": {"target": str, "item": str},
+    "examine": {"target": str},
+    "pickup": {"slug": str},
+    "drop": {"slug": str},
+    "equip": {"slug": str},
+    "unequip": {"slot": str},
+    "craft": {"recipe": str},
+    "buy": {"target": str, "item": str, "qty?": int},
+    "sell": {"target": str, "item": str, "qty?": int},
+    "cast": {"spell": str, "target?": str},
+    "tame": {"target": str},
+    "accept_quest": {"target": str},
+    "store": {"slug": str, "qty?": int},
+    "withdraw": {"slug": str, "qty?": int},
+    "buy_house": {"slug": str},
+    "accept_offer": {"offer_id": str},
+    "reject_offer": {"offer_id": str},
+}
+
+
+def _validate_action_shape(verb: str, action: dict[str, Any]) -> str | None:
+    """Return None if the action's fields match the verb's schema,
+    or a human-readable error string. Errors are short and structured
+    enough to be useful in the spectator UI."""
+    schema = _VERB_SCHEMAS.get(verb)
+    if schema is None:
+        return None  # unknown or schema-less verb — not our concern here
+    for key, expected_type in schema.items():
+        optional = key.endswith("?")
+        field = key.rstrip("?")
+        if field not in action or action[field] is None:
+            if not optional:
+                return f"missing required field '{field}'"
+            continue
+        value = action[field]
+        if not isinstance(value, expected_type):
+            got = type(value).__name__
+            want = (
+                expected_type.__name__
+                if isinstance(expected_type, type)
+                else "/".join(t.__name__ for t in expected_type)
+            )
+            return f"field '{field}' wants {want}, got {got}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Resolve
 # ---------------------------------------------------------------------------
 
 
 def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
+    # P1-4: dead heroes cannot act. The tick loop already filters alive
+    # heroes when scheduling, but managed bots can race a death write
+    # over WebSocket — without this guard, a corpse mutates the world.
+    if hero.status != "alive":
+        return ResolutionResult(False, {"error": "hero is dead", "reason": "dead", "verb": None})
+
     if not isinstance(action, dict):
         return ResolutionResult(False, {"error": "action must be a dict", "verb": None})
 
     verb = action.get("do")
+    # P2-5: shape-check the action's required fields before dispatching.
+    # Catches the FIX_PLAN done-when case ({"do":"attack","target":42})
+    # with a structured reason="bad_action_shape" so it lands in the
+    # parse_failure stream rather than as a downstream "no such NPC".
+    if isinstance(verb, str):
+        shape_err = _validate_action_shape(verb, action)
+        if shape_err is not None:
+            return ResolutionResult(False, {
+                "verb": verb,
+                "error": shape_err,
+                "reason": "bad_action_shape",
+            })
 
     if verb == "wait":
         return ResolutionResult(True, {"verb": "wait"})
 
     if verb == "look":
-        radius = _look_radius(hero)
+        radius = look_radius(hero)
         return ResolutionResult(
             True,
             {
@@ -1557,7 +1718,10 @@ def resolve(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult
     if verb == "flee":
         return _resolve_flee(db, hero, action)
 
-    return ResolutionResult(False, {"verb": verb, "error": f"unknown verb '{verb}'"})
+    return ResolutionResult(
+        False,
+        {"verb": verb, "error": f"unknown verb '{verb}'", "reason": "unknown_verb"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1628,9 +1792,10 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
         target.alive = False
         loot_gold = target.loot_gold
         if loot_gold > 0:
-            mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-            mem["gold"] = int(mem.get("gold", 0)) + loot_gold
-            hero.memory = mem
+            _set_hero_gold(
+                db, hero, _hero_gold(hero) + loot_gold,
+                source="attack_mob_loot",
+            )
         _grant_xp(hero, "melee", 5)
         completed_quests = _quest_progress(db, hero, "kill_count", target.slug, 1)
         _grant_rep(hero, "council", 1, db=db)
@@ -1784,15 +1949,11 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
         if bounty_payouts:
             outcome["bounties_claimed"] = bounty_payouts
         # 50% of victim's gold goes to the killer (per DESIGN.md §6 #6).
-        victim_mem = dict(target.memory) if isinstance(target.memory, dict) else {}
-        victim_gold = int(victim_mem.get("gold", 0) or 0)
+        victim_gold = _hero_gold(target)
         looted_gold = victim_gold // 2
         if looted_gold > 0:
-            victim_mem["gold"] = victim_gold - looted_gold
-            target.memory = victim_mem
-            killer_mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-            killer_mem["gold"] = int(killer_mem.get("gold", 0) or 0) + looted_gold
-            hero.memory = killer_mem
+            _set_hero_gold(db, target, victim_gold - looted_gold, source="pvp_looted")
+            _set_hero_gold(db, hero, _hero_gold(hero) + looted_gold, source="pvp_loot")
 
     outcome.update(
         hit=True, damage=damage,
@@ -1948,7 +2109,7 @@ def _resolve_examine(db: Session, hero: Hero, action: dict[str, Any]) -> Resolut
     if not target:
         return ResolutionResult(False, {"verb": "examine", "error": "missing target"})
 
-    radius = _look_radius(hero)
+    radius = look_radius(hero)
     npc = db.get(NPC, str(target)) if isinstance(target, str) else None
     if npc and npc.zone == hero.zone and abs(npc.pos_x - hero.pos_x) + abs(npc.pos_y - hero.pos_y) <= radius:
         return ResolutionResult(
@@ -1977,6 +2138,9 @@ def _resolve_examine(db: Session, hero: Hero, action: dict[str, Any]) -> Resolut
 
 def _resolve_pickup(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionResult:
     target_slug = action.get("slug")
+    # P1-3: lock candidate ground items so two heroes hitting the same
+    # tile in the same tick can't both grab the same stack. Postgres
+    # serialises here; SQLite is single-writer anyway.
     items_here = list(
         db.scalars(
             select(Item).where(
@@ -1984,13 +2148,17 @@ def _resolve_pickup(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
                 Item.pos_x == hero.pos_x,
                 Item.pos_y == hero.pos_y,
                 Item.owner_hero_id.is_(None),
-            )
+            ).with_for_update()
         )
     )
     if not items_here:
         return ResolutionResult(False, {"verb": "pickup", "error": "no items at this tile"})
 
     ground = next((i for i in items_here if i.slug == target_slug), items_here[0])
+    # Re-check ownership inside the lock — by the time we got here the
+    # item could have been claimed by another transaction.
+    if ground.owner_hero_id is not None:
+        return ResolutionResult(False, {"verb": "pickup", "error": "item already taken"})
     qty = int(ground.quantity or 1)
 
     # Merge into existing stack if any; otherwise transfer ownership.
@@ -2116,7 +2284,7 @@ def _visible_resource_nodes(db: Session, hero: Hero, radius: int) -> list[dict[s
     return out
 
 
-def _journal_relevant(db: Session, hero: Hero, n: int = 5) -> list[dict[str, Any]]:
+def _journal_relevant(db: Session, hero: Hero, n: int) -> list[dict[str, Any]]:
     """Top-K journal entries scored by the active retriever, biased by the
     hero's manifest-declared `recall_tags`. This is the "memories you carry"
     slice — durable across distance and time, not just the last few ticks."""
@@ -2142,7 +2310,7 @@ def _journal_relevant(db: Session, hero: Hero, n: int = 5) -> list[dict[str, Any
     return out
 
 
-def _journal_recent(db: Session, hero: Hero, n: int = 12) -> list[dict[str, Any]]:
+def _journal_recent(db: Session, hero: Hero, n: int) -> list[dict[str, Any]]:
     """Recency-weighted slice for the LLM context."""
     rows = list(
         db.scalars(
@@ -2157,10 +2325,12 @@ def _journal_recent(db: Session, hero: Hero, n: int = 12) -> list[dict[str, Any]
     return out
 
 
-def _memory_tags(db: Session, hero: Hero) -> list[str]:
-    """The set of all unique tags the hero has ever earned in their journal —
-    fed to the bot's reflex evaluator as `memory_tags` so deterministic rules
-    can branch on long-term memory without burning a token. Capped at 200."""
+def _memory_tags(db: Session, hero: Hero, limit: int) -> list[str]:
+    """The set of unique tags the hero has earned in their journal — fed to
+    the bot's reflex evaluator as `memory_tags` so deterministic rules can
+    branch on long-term memory without burning a token. Capped at `limit`,
+    biased toward tags from the most recent entries so the working set is
+    relevant rather than archaeological."""
     rows = list(
         db.scalars(
             select(JournalEntry.tags)
@@ -2173,18 +2343,81 @@ def _memory_tags(db: Session, hero: Hero) -> list[str]:
     for taglist in rows:
         for t in (taglist or []):
             tags.add(str(t))
-            if len(tags) >= 200:
+            if len(tags) >= limit:
                 break
-        if len(tags) >= 200:
+        if len(tags) >= limit:
             break
     return sorted(tags)
 
 
+def _ranked_inventory(hero: Hero, items: list[Item], limit: int) -> list[Item]:
+    """Sort inventory: equipped slots first (so a wizard's wand is never
+    truncated off), then most-recently-acquired (id desc as a proxy until
+    last_used_tick exists). Truncate at `limit`."""
+    equipped_slugs = set((hero.equipped or {}).values()) if isinstance(hero.equipped, dict) else set()
+    items_sorted = sorted(
+        items,
+        key=lambda i: (
+            0 if i.slug in equipped_slugs else 1,
+            -((i.id.int) if hasattr(i.id, "int") else hash(str(i.id))),
+            i.slug,
+        ),
+    )
+    return items_sorted[:limit]
+
+
+# Trim order when perception still exceeds the token ceiling after
+# WIS caps: drop from the lists that hurt comprehension least first.
+# Visible NPCs are last because they drive combat decisions — losing
+# the hostile mob standing on the hero's tile means losing the tick.
+# Inventory drops before NPCs because "what's around me right now"
+# matters more than "what I'm carrying" for the next-action choice.
+_TRIM_PRIORITY: tuple[str, ...] = (
+    "memory_tags",
+    "journal_relevant",
+    "journal_recent",
+    "visible_heroes",
+    "inventory",
+    "visible_npcs",
+)
+
+
+def _estimate_tokens(payload: dict[str, Any]) -> int:
+    """Cheap token estimator: ~4 chars per token. Matches the gateway's
+    StubProvider's accounting so on-server estimates stay in the same
+    units as gateway-side billing."""
+    import json as _json
+    return len(_json.dumps(payload, separators=(",", ":"), default=str)) // 4
+
+
+def _trim_to_token_ceiling(payload: dict[str, Any], ceiling: int) -> dict[str, Any]:
+    """Drop tail entries in strict priority order: drain memory_tags
+    fully before touching journal_relevant, drain journal_relevant
+    fully before journal_recent, and so on. Visible_npcs is last and
+    only loses entries when everything cheaper is already empty."""
+    if _estimate_tokens(payload) <= ceiling:
+        return payload
+    for key in _TRIM_PRIORITY:
+        value = payload.get(key)
+        if not (isinstance(value, list) and value):
+            continue
+        # Drop tail entries from THIS list until either it's empty or
+        # the payload fits. Relevance was already used to sort, so
+        # [-1] is always the safest one to lose.
+        while payload[key] and _estimate_tokens(payload) > ceiling:
+            payload[key] = payload[key][:-1]
+        if _estimate_tokens(payload) <= ceiling:
+            return payload
+    return payload
+
+
 def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
-    radius = _look_radius(hero)
+    radius = look_radius(hero)
+    budget = perception_budget(hero)
     zone = db.get(Zone, hero.zone)
-    inventory = list(db.scalars(select(Item).where(Item.owner_hero_id == hero.id)))
-    return {
+    inventory_all = list(db.scalars(select(Item).where(Item.owner_hero_id == hero.id)))
+    inventory = _ranked_inventory(hero, inventory_all, budget.max_inventory)
+    payload = {
         "zone": {
             "slug": hero.zone,
             "name": zone.name if zone else hero.zone,
@@ -2194,8 +2427,8 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         },
         "self_pos": [hero.pos_x, hero.pos_y],
         "visible_radius": radius,
-        "visible_heroes": _visible_heroes_in_zone(db, hero, radius),
-        "visible_npcs": _visible_npcs_in_zone(db, hero, radius),
+        "visible_heroes": _visible_heroes_in_zone(db, hero, radius, limit=budget.max_visible_heroes),
+        "visible_npcs": _visible_npcs_in_zone(db, hero, radius, limit=budget.max_visible_npcs),
         "visible_items": _visible_items_in_zone(db, hero, radius),
         "inventory": [
             {
@@ -2206,7 +2439,17 @@ def perception_for(db: Session, hero: Hero) -> dict[str, Any]:
         ],
         "visible_resources": _visible_resource_nodes(db, hero, radius),
         "memory": hero.memory or {},
-        "journal_recent": _journal_recent(db, hero),
-        "journal_relevant": _journal_relevant(db, hero),
-        "memory_tags": _memory_tags(db, hero),
+        "journal_recent": _journal_recent(db, hero, journal_recent_limit(hero)),
+        "journal_relevant": _journal_relevant(db, hero, journal_relevant_k(hero)),
+        "memory_tags": _memory_tags(db, hero, budget.max_memory_tags),
     }
+    # P0-2 step 3: estimate the perception's token cost. If past the
+    # INT-derived ceiling (perception_token_ceiling = 50% of the hero's
+    # max_tokens budget), trim further from the tail of the trim-priority
+    # lists. Estimate is recorded into the payload so spectators can see
+    # how close to the budget the prompt got.
+    ceiling = perception_token_ceiling(hero)
+    payload = _trim_to_token_ceiling(payload, ceiling)
+    payload["_perception_tokens_estimated"] = _estimate_tokens(payload)
+    payload["_perception_tokens_ceiling"] = ceiling
+    return payload

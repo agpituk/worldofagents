@@ -33,37 +33,25 @@ class ManagedHeroTask:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
 
-        # Manifests can be wrapped in a top-level `hero:` block.
+        # Lazy imports — the SDK install must be on PYTHONPATH (it is in
+        # production via the docker layer; in tests via conftest).
+        from arena_bot.hero_runtime import (
+            HeroDecisionState, parse_abilities, parse_persona,
+        )
+        from arena_bot.reflexes import ReflexEngine
+
         inner = manifest.get("hero") if isinstance(manifest.get("hero"), dict) else manifest
         self._inner = inner or {}
-        self._bio = self._inner.get("bio") or ""
-        memory = self._inner.get("memory") or {}
-        self._goal = (memory.get("initial") or {}).get("goal") or "Survive."
-        self._system_summary = (memory.get("system_summary") or "").strip()
 
-        models = self._inner.get("models") or {}
-        alias = self._inner.get("model") or "cheap"
-        spec = models.get(alias) if isinstance(models, dict) else None
-        self._model_id = (spec or {}).get("model") if isinstance(spec, dict) else "qwen3-4b"
+        persona = parse_persona(manifest)
+        self._bio = persona["bio"]
+        self._goal = persona["goal"] or "Survive."
+        self._system_summary = persona["system_summary"]
+        self._model_id = persona["model_id"]
 
-        # Lazy imports so the world-api still boots if the SDK install
-        # somehow failed at container start.
-        from arena_bot.reflexes import ReflexEngine
         self._reflexes = ReflexEngine(self._inner.get("reflexes") or [])
-
-        # Composites: a reflex action with `do == ability_name` expands into
-        # the named ability's primitive steps, dispatched one per tick.
-        abilities = self._inner.get("abilities") or {}
-        self._abilities: dict[str, list[dict[str, Any]]] = {}
-        if isinstance(abilities, dict):
-            for n, sp in abilities.items():
-                if not isinstance(sp, dict):
-                    continue
-                steps = sp.get("steps") or sp.get("decompose") or []
-                if isinstance(steps, list):
-                    self._abilities[str(n)] = [s for s in steps if isinstance(s, dict) and s.get("do")]
-        self._composite_queue: list[dict[str, Any]] = []
-        self._composite_name: str | None = None
+        self._abilities = parse_abilities(manifest)
+        self._state = HeroDecisionState()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -133,49 +121,26 @@ class ManagedHeroTask:
 
     async def _decide(self, msg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
         from arena_bot.client import Perception
+        from arena_bot.hero_runtime import decide_one
 
         perception = Perception(
             tick_id=msg["tick_id"],
             your_state=msg["your_state"],
             perception=msg["perception"],
             deadline_ms=msg.get("deadline_ms", 6000),
+            gateway_permission_token=msg.get("gateway_permission_token"),
         )
 
-        # If a composite is in flight, drain its next step.
-        if self._composite_queue:
-            step = self._composite_queue.pop(0)
-            debug = {"via": "composite", "composite": self._composite_name,
-                     "remaining": len(self._composite_queue)}
-            if not self._composite_queue:
-                self._composite_name = None
-            return dict(step), debug, "reflex"
-
-        action, debug = self._reflexes.evaluate_with_debug(perception)
-        if action is None:
-            return {"do": "wait"}, {"reflex_index": -1, "note": "no reflex matched"}, "reflex"
-
-        # Composite expansion.
-        if action.get("do") in self._abilities:
-            name = action["do"]
-            steps = list(self._abilities[name])
-            if steps:
-                self._composite_name = name
-                self._composite_queue = steps[1:]
-                first = steps[0]
-                d_debug = {"via": "composite_start", "composite": name,
-                           "remaining": len(self._composite_queue),
-                           "reflex_index": (debug or {}).get("reflex_index"),
-                           "when": (debug or {}).get("when")}
-                return dict(first), d_debug, "reflex"
-
-        if action.get("do") == "invoke_llm":
-            llm_action = await self._call_llm(perception)
-            d_debug = {"via": "invoke_llm",
-                       "reflex_index": (debug or {}).get("reflex_index"),
-                       "when": (debug or {}).get("when")}
-            return llm_action, d_debug, "llm"
-
-        return action, debug, "reflex"
+        # The shared hero_runtime owns reflex-eval, composite-drain
+        # (with P2-2 interrupt re-check), and invoke_llm dispatch.
+        # The transport-specific bit is _call_llm, which we inject.
+        action, debug = await decide_one(
+            state=self._state, perception=perception,
+            reflex_engine=self._reflexes, abilities=self._abilities,
+            on_invoke_llm=self._call_llm,
+        )
+        kind = "llm" if (debug or {}).get("via") == "invoke_llm" else "reflex"
+        return action, debug, kind
 
     # ------------------------------------------------------------------
     # Gateway call
@@ -196,7 +161,7 @@ class ManagedHeroTask:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        payload = {
+        payload: dict[str, Any] = {
             "hero_id": self.hero_id,
             "model": self._model_id,
             "messages": messages,
@@ -204,6 +169,8 @@ class ManagedHeroTask:
             "tool_choice": "auto",
             "tick_id": perception.tick_id,
         }
+        if perception.gateway_permission_token:
+            payload["permission_token"] = perception.gateway_permission_token
         try:
             async with httpx.AsyncClient(base_url=_gateway_base_url(), timeout=60.0) as client:
                 r = await client.post("/think", json=payload)
