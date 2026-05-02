@@ -133,6 +133,13 @@ class ManagedHeroTask:
             gateway_permission_token=msg.get("gateway_permission_token"),
         )
 
+        # Per-tick trace event accumulator — the dispatcher pushes
+        # tool.* events here, and we forward them to the action
+        # submission so they land in the Event table under the
+        # action.resolved row's debug payload. The Inspector reads
+        # them back from there.
+        self._tick_trace: list[dict[str, Any]] = []
+
         # The shared hero_runtime owns reflex-eval, composite-drain
         # (with P2-2 interrupt re-check), and invoke_llm dispatch.
         # The transport-specific bit is _call_llm, which we inject.
@@ -142,6 +149,11 @@ class ManagedHeroTask:
             on_invoke_llm=self._call_llm,
         )
         kind = "llm" if (debug or {}).get("via") == "invoke_llm" else "reflex"
+
+        # Attach the captured tool events (if any) to debug.
+        if self._tick_trace:
+            debug = dict(debug or {})
+            debug["tool_events"] = list(self._tick_trace)
         return action, debug, kind
 
     # ------------------------------------------------------------------
@@ -203,9 +215,35 @@ class ManagedHeroTask:
                 or self._toolset.is_override(chosen_name)
             ):
                 namespace = build_context(perception)
+                trace_buf = getattr(self, "_tick_trace", None)
+
+                def _trace(event: str, payload: dict[str, Any]) -> None:
+                    if trace_buf is not None:
+                        trace_buf.append({"event": event, "payload": payload})
+
+                # Stash the LLM-facing tool list and reasoning so the
+                # Inspector's "why didn't my tool fire?" view has data.
+                if trace_buf is not None:
+                    trace_buf.append({
+                        "event": "llm.tools_offered",
+                        "payload": {
+                            "chosen_tool": chosen_name,
+                            "chosen_args": chosen_args,
+                            "tools_offered": [
+                                {
+                                    "name": s["function"]["name"],
+                                    "description": s["function"]["description"][:240],
+                                }
+                                for s in specs
+                            ],
+                            "reasoning_trace": (body.get("completion") or "")[:500],
+                        },
+                    })
+
                 result = expand_tool_call(
                     chosen_name, chosen_args,
                     toolset=self._toolset, namespace=namespace,
+                    trace=_trace,
                 )
                 if not result.actions:
                     return {"do": "wait"}

@@ -5,6 +5,7 @@ import { use, useEffect, useRef, useState } from "react";
 import { api, Hero, JournalEntry, Longevity, MemoryTrace, Quest } from "@/lib/api";
 import { formatLifespan } from "@/lib/format";
 import { useZoneStream } from "@/lib/use-zone-stream";
+import ToolListPanel from "@/components/inspector/ToolListPanel";
 
 export default function HeroPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -460,6 +461,12 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
             </div>
           )}
         </details>
+
+        {/* Inspector — Phase 5. Shows the hero's user-defined tools with
+            stats and a per-tick "why didn't my tool fire?" deep-link. */}
+        <div className="mt-6">
+          <ToolListPanel heroId={id} />
+        </div>
       </aside>
 
       <section className="border-l border-border pl-6 min-h-[60vh]">
