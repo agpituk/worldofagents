@@ -563,6 +563,14 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
                       {debug.via === "invoke_llm" && (
                         <span className="text-amber"> · invoke_llm</span>
                       )}
+                      {debug.via === "invoke_llm" && e.data?.tick_id && (
+                        <Link
+                          href={`/heroes/${id}/ticks/${e.data.tick_id}`}
+                          className="ml-2 text-emerald-400 hover:text-emerald-300 underline decoration-dotted"
+                        >
+                          debug this choice →
+                        </Link>
+                      )}
                     </div>
                   )}
                 </li>
