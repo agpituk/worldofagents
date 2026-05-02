@@ -16,7 +16,10 @@ from app.core import models  # noqa: F401  (register all models so the registry 
 from app.core.tick import tick_engine
 from app.domains.bounty import router as bounty_router
 from app.domains.contract import router as contract_router
-from app.domains.manifest_validate import router as manifest_validate_router
+from app.domains.manifest_validate import (
+    admin_router as manifest_admin_router,
+    router as manifest_validate_router,
+)
 from app.domains.hero import router as hero_router
 from app.domains.highlight import router as highlight_router
 from app.domains.item import router as item_router
@@ -106,5 +109,6 @@ app.include_router(tournament_router)
 app.include_router(bounty_router)
 app.include_router(contract_router)
 app.include_router(manifest_validate_router)
+app.include_router(manifest_admin_router)
 app.include_router(world_event_router)
 app.include_router(highlight_router)

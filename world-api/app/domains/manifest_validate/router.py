@@ -29,9 +29,14 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.models import NPC, Recipe, Spell, Zone
 from app.domains.hero.service import HeroService
+from app.domains.manifest_validate.clamp_table import CLAMP_TABLE
 from app.domains.manifest_validate.tools_validator import validate_tools
 
 router = APIRouter(prefix="/manifest", tags=["manifest"])
+
+# A second router so the verb-catalog endpoint mounts under /admin without
+# moving the existing /manifest/validate path.
+admin_router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 # Verbs the world resolves today. Drift here means an out-of-date
@@ -216,3 +221,27 @@ async def validate_manifest(
             "tools_declared": len(parsed_tools),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# /admin/verb-catalog — read-only verb spec for the block editor
+# ---------------------------------------------------------------------------
+
+
+@admin_router.get("/verb-catalog")
+def verb_catalog():
+    """Public verb metadata: what verbs exist, which params each takes,
+    which params are clampable. Consumed by the frontend's block-spec
+    generator (BLOCK_EDITOR.md §8). No auth — the verb list is public
+    information already exposed by the bot SDK's docstrings."""
+    out: list[dict[str, Any]] = []
+    for verb in sorted(VALID_VERBS):
+        clamps = CLAMP_TABLE.get(verb, {})
+        out.append({
+            "verb": verb,
+            "clampable": [
+                {"param": p, "kind": spec.kind, "max_length": spec.max_length}
+                for p, spec in clamps.items()
+            ],
+        })
+    return {"verbs": out}

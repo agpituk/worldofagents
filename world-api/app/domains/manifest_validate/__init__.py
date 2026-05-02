@@ -1,1 +1,1 @@
-from app.domains.manifest_validate.router import router  # noqa: F401
+from app.domains.manifest_validate.router import admin_router, router  # noqa: F401

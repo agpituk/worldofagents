@@ -152,17 +152,48 @@ def test_override_for_unknown_verb_rejected():
     assert any("ride_unicorn" in i["message"] for i in issues)
 
 
-def test_phase2_rejects_when_clamp_after():
-    """Until Phase 3 lands, the override grammar is gated."""
-    for forbidden in ({"when": "hp > 1"}, {"clamp": {"x": "1"}}, {"after": [{"do": "look"}]}):
-        entry = {"override": "gather", "description": "x", **forbidden}
-        issues, _ = validate_tools([entry], valid_verbs=VALID_VERBS)
-        assert any("Phase 3" in i["message"] for i in issues), (
-            f"expected Phase 3 gate for {forbidden}"
-        )
+def test_when_expression_validated():
+    # Valid when: passes
+    issues, _ = validate_tools(
+        [{"override": "gather", "description": "x", "when": "hp > 8"}],
+        valid_verbs=VALID_VERBS,
+    )
+    assert _err_paths(issues) == []
+    # Garbage when: rejected
+    issues, _ = validate_tools(
+        [{"override": "gather", "description": "x", "when": "hp >>>"}],
+        valid_verbs=VALID_VERBS,
+    )
+    assert any("syntax" in i["message"] or "unsafe" in i["message"] for i in issues)
 
 
-def test_phase2_rejects_if_step_in_composite():
+def test_clamp_param_must_be_clampable():
+    # Clamping `target` of attack (in CLAMP_TABLE) — passes
+    issues, _ = validate_tools(
+        [{"override": "attack", "description": "x", "clamp": {"target": "requested"}}],
+        valid_verbs=VALID_VERBS,
+    )
+    assert _err_paths(issues) == []
+    # Clamping a non-existent param of attack — rejected
+    issues, _ = validate_tools(
+        [{"override": "attack", "description": "x", "clamp": {"distance": "1"}}],
+        valid_verbs=VALID_VERBS,
+    )
+    assert any("not a clampable" in i["message"] for i in issues)
+
+
+def test_after_step_cannot_call_overridden_verb():
+    issues, _ = validate_tools(
+        [{
+            "override": "move", "description": "x",
+            "after": [{"do": "move"}],
+        }],
+        valid_verbs=VALID_VERBS,
+    )
+    assert any("would loop" in i["message"] for i in issues)
+
+
+def test_if_step_in_composite_passes_with_valid_expression():
     issues, _ = validate_tools(
         [{
             "name": "branchy",
@@ -171,7 +202,23 @@ def test_phase2_rejects_if_step_in_composite():
         }],
         valid_verbs=VALID_VERBS,
     )
-    assert any("Phase 3" in i["message"] for i in issues)
+    assert _err_paths(issues) == []
+
+
+def test_if_step_full_form_passes():
+    issues, _ = validate_tools(
+        [{
+            "name": "smart",
+            "description": "x",
+            "steps": [{
+                "if": "hp > 12",
+                "then": [{"do": "attack", "args": {"target": "rat_a"}}],
+                "else": [{"do": "flee"}],
+            }],
+        }],
+        valid_verbs=VALID_VERBS,
+    )
+    assert _err_paths(issues) == []
 
 
 def test_docstring_only_override_passes():

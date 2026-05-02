@@ -151,6 +151,7 @@ class ManagedHeroTask:
     async def _call_llm(self, perception: "Perception") -> dict[str, Any]:  # type: ignore[name-defined]
         from arena_bot.actions import DEFAULT_TOOLS
         from arena_bot.client import build_tool_action_prompt, parse_json_action
+        from arena_bot.reflexes import build_context
         from arena_bot.tool_dispatch import expand_tool_call
         from arena_bot.tools import (
             build_tool_index, build_tool_specs_for_hero,
@@ -195,11 +196,16 @@ class ManagedHeroTask:
             chosen_name = first.get("name", "")
             chosen_args = first.get("arguments") or {}
 
-            # Composite tool — expand and queue the tail through the same
-            # composite_queue mechanism abilities use.
-            if self._toolset.is_composite(chosen_name):
+            # Composite or override — expand and queue the tail through
+            # the same composite_queue mechanism abilities use.
+            if (
+                self._toolset.is_composite(chosen_name)
+                or self._toolset.is_override(chosen_name)
+            ):
+                namespace = build_context(perception)
                 result = expand_tool_call(
-                    chosen_name, chosen_args, toolset=self._toolset,
+                    chosen_name, chosen_args,
+                    toolset=self._toolset, namespace=namespace,
                 )
                 if not result.actions:
                     return {"do": "wait"}

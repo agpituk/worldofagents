@@ -677,24 +677,30 @@ class Hero:
 
         # Composite tool — expand via the dispatcher. First primitive is
         # this tick's action; the rest land in composite_queue_tail.
-        if toolset is not None and toolset.is_composite(chosen_name):
+        # Overrides apply when the LLM picks a primitive (handled below).
+        if toolset is not None and (
+            toolset.is_composite(chosen_name) or toolset.is_override(chosen_name)
+        ):
+            from arena_bot.reflexes import build_context
             from arena_bot.tool_dispatch import expand_tool_call
 
+            namespace = build_context(perception)
             result = expand_tool_call(
-                chosen_name, chosen_args, toolset=toolset,
+                chosen_name, chosen_args, toolset=toolset, namespace=namespace,
             )
             if not result.actions:
-                log.warning("composite '%s' expanded to nothing — falling back",
+                log.warning("tool '%s' expanded to nothing — falling back",
                             chosen_name)
                 return Decision(kind="reflex", action=fallback)
             head, *tail = result.actions
-            log.info("LLM picked composite: %s(%s) → %d actions",
+            log.info("LLM picked %s: %s(%s) → %d actions",
+                     "composite" if toolset.is_composite(chosen_name) else "override",
                      chosen_name, chosen_args, len(result.actions))
             return Decision(
                 kind="llm", action=head,
                 gateway_token=body["gateway_token"],
                 composite_queue_tail=tail or None,
-                debug={"composite": chosen_name, "expanded": len(result.actions)},
+                debug={"tool": chosen_name, "expanded": len(result.actions)},
             )
 
         fn = index.get(chosen_name)

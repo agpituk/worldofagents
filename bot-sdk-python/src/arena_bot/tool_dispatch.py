@@ -6,27 +6,31 @@ walks its `steps` and produces a queue of primitive action dicts the
 runtime can dispatch one per tick (using the same composite-queue
 mechanism `abilities:` already uses).
 
-Phase 2 (this cut):
-  • Composite expansion (no `if`-step).
-  • Docstring override is a no-op at dispatch time — the override only
-    changes the description shown to the LLM (handled in `tools.py`).
-  • Trace events: `tool.expanded`, `tool.budget_exceeded`.
-
-Phase 3 will add:
-  • `when:` gate, `clamp:` argument shaping, `after:` post-chain,
-    `if`-step inside composites.
-  • Trace events: `tool.gated`, `tool.clamped`, `tool.clamp.invalid`,
-    `tool.clamp.error`, `tool.after.step`, `tool.after.step.failed`,
-    `tool.expression.type_error`.
+Covers Phase 2 + Phase 3:
+  • Composite expansion with `if`-step (simple + full forms).
+  • Docstring overrides (description-only — see `tools.py`).
+  • Override middleware: `when:` → `clamp:` → primitive → `after:`.
+  • `{{ expr }}` and `{_expr: ...}` interpolation through the sandbox.
+  • Trace events: tool.expanded, tool.gated, tool.clamped,
+    tool.clamp.invalid, tool.clamp.error, tool.after.step,
+    tool.after.step.failed, tool.expression.type_error,
+    tool.budget_exceeded.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from arena_bot.reflex_sandbox import (
+    ExpressionTypeError,
+    UnsafeExpression,
+    sandbox_eval,
+    sandbox_eval_bool,
+)
 from arena_bot.tool_schema import (
     CompositeTool,
     OverrideTool,
@@ -134,15 +138,20 @@ def expand_tool_call(
     toolset: HeroToolset,
     trace: TraceSink = _noop_trace,
     budget: ExpansionBudget | None = None,
+    namespace: dict[str, Any] | None = None,
 ) -> DispatchResult:
     """Resolve one LLM-picked tool name + args into a queue of primitive
-    action dicts. If the name is a primitive (or a primitive under
-    docstring override), this is a single-action passthrough.
+    action dicts.
 
-    Phase 2 only.
+    `namespace` is the expression evaluation context — hero state
+    scalars + reflex helpers. Required when overrides use `when:` or
+    `clamp:` or composites use `if`-step / interpolation. The runner
+    builds it from perception (see `runner.py`); tests can pass an
+    empty dict for primitives without override grammar.
     """
     if budget is None:
         budget = ExpansionBudget()
+    ns = namespace or {}
 
     # Composite tool — recurse into its steps.
     if toolset.is_composite(name):
@@ -159,6 +168,7 @@ def expand_tool_call(
                 budget=budget,
                 out=actions,
                 visiting={name},
+                namespace=ns,
             )
         except _BudgetExceeded:
             trace("tool.budget_exceeded", {
@@ -166,7 +176,6 @@ def expand_tool_call(
                 "primitives_used": budget.primitives_used,
                 "elapsed_ms": budget.elapsed_ms(),
             })
-            # Best-effort: return what we have if non-empty, otherwise wait.
             if actions:
                 return DispatchResult(ok=True, actions=actions, reason="budget_partial")
             return DispatchResult(
@@ -174,11 +183,147 @@ def expand_tool_call(
             )
         return DispatchResult(ok=True, actions=actions or [{"do": "wait"}])
 
-    # Primitive (with or without docstring override) — single action passthrough.
+    # Primitive — apply override middleware if one exists for this verb.
+    override = toolset.overrides.get(name)
+    if override is not None:
+        return _dispatch_override(
+            name, args or {}, override,
+            toolset=toolset, trace=trace, budget=budget, namespace=ns,
+        )
+
+    # Primitive without override — single action passthrough.
     action = {"do": name}
     if args:
         action.update(args)
     return DispatchResult(ok=True, actions=[action])
+
+
+def _dispatch_override(
+    name: str,
+    args: dict[str, Any],
+    override: OverrideTool,
+    *,
+    toolset: HeroToolset,
+    trace: TraceSink,
+    budget: ExpansionBudget,
+    namespace: dict[str, Any],
+) -> DispatchResult:
+    """Apply the when → clamp → primitive → after middleware chain
+    described in GRAMMAR.md §7."""
+
+    # 1. when?
+    if override.when_expr:
+        try:
+            ok = sandbox_eval_bool(
+                override.when_expr, namespace=namespace, args=args,
+            )
+        except ExpressionTypeError as exc:
+            trace("tool.expression.type_error", {
+                "tool": name, "stage": "when", "error": str(exc),
+            })
+            ok = False
+        except (UnsafeExpression, SyntaxError, NameError, Exception) as exc:
+            trace("tool.expression.type_error", {
+                "tool": name, "stage": "when", "error": repr(exc),
+            })
+            ok = False
+        if not ok:
+            trace("tool.gated", {"tool": name, "reason": "when_false"})
+            # Gated: return a structured "wait" so the LLM gets feedback.
+            return DispatchResult(
+                ok=False,
+                actions=[{"do": "wait", "_blocked_by_override": name}],
+                reason="blocked_by_override",
+            )
+
+    # 2. clamp?
+    clamped_args = dict(args)
+    if override.clamp:
+        clamped_args = _apply_clamps(
+            name, override.clamp, args, namespace=namespace, trace=trace,
+        )
+
+    # 3. primitive
+    primitive_action = {"do": name}
+    primitive_action.update(clamped_args)
+    actions: list[dict[str, Any]] = [primitive_action]
+    budget.charge_one()
+
+    # 4. after — each step processed like a composite step (no nested after,
+    # no recursive call to the overridden verb — validator catches both).
+    if override.after and budget.has_capacity():
+        try:
+            _walk_steps(
+                override.after,
+                parent_args=clamped_args,
+                composite_param_defs=[],
+                toolset=toolset,
+                trace=trace,
+                budget=budget,
+                out=actions,
+                visiting=set(),
+                namespace=namespace,
+                emit_after_events=True,
+                after_verb=name,
+            )
+        except _BudgetExceeded:
+            trace("tool.budget_exceeded", {
+                "tool": name,
+                "stage": "after",
+                "primitives_used": budget.primitives_used,
+                "elapsed_ms": budget.elapsed_ms(),
+            })
+    return DispatchResult(ok=True, actions=actions)
+
+
+def _apply_clamps(
+    verb: str,
+    clamps: dict[str, str],
+    args: dict[str, Any],
+    *,
+    namespace: dict[str, Any],
+    trace: TraceSink,
+) -> dict[str, Any]:
+    """Per-param clamp evaluation. GRAMMAR.md §3 semantics:
+      • Expression returns invalid → keep `requested`, emit
+        tool.clamp.invalid.
+      • Expression raises → keep `requested`, emit tool.clamp.error.
+      • Expression returns a value different from requested → emit
+        tool.clamped { from, to }.
+    """
+    out = dict(args)
+    for param, expr in clamps.items():
+        requested = args.get(param)
+        try:
+            value = sandbox_eval(
+                expr, namespace=namespace, args=args,
+                requested=requested,
+                param_lookup=lambda n: args.get(n),
+            )
+        except (
+            ExpressionTypeError, UnsafeExpression,
+            SyntaxError, NameError, TypeError, ValueError, ZeroDivisionError,
+        ) as exc:
+            trace("tool.clamp.error", {
+                "verb": verb, "param": param, "error": repr(exc),
+            })
+            continue
+
+        # Coercion is light-touch in Phase 3 — defer heavy validation
+        # (slug membership, tile-in-zone) to the server's existing per-verb
+        # checks. Here we accept the value if it's not None.
+        if value is None:
+            trace("tool.clamp.invalid", {
+                "verb": verb, "param": param, "reason": "none",
+            })
+            continue
+        out[param] = value
+        if value != requested:
+            trace("tool.clamped", {
+                "verb": verb, "param": param,
+                "from": requested, "to": value,
+            })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +346,9 @@ def _walk_steps(
     budget: ExpansionBudget,
     out: list[dict[str, Any]],
     visiting: set[str],
+    namespace: dict[str, Any],
+    emit_after_events: bool = False,
+    after_verb: str | None = None,
 ) -> None:
     # Apply parameter defaults — the dispatcher fills in defaults the LLM
     # didn't supply, so step interpolation always sees a complete map.
@@ -209,9 +357,56 @@ def _walk_steps(
     for step in steps:
         if not budget.has_capacity():
             raise _BudgetExceeded
+
+        # if-step (full or simple form)
+        if "if" in step:
+            cond_expr = step["if"]
+            try:
+                cond = sandbox_eval_bool(
+                    cond_expr, namespace=namespace, args=effective_args,
+                )
+            except ExpressionTypeError as exc:
+                trace("tool.expression.type_error", {
+                    "stage": "if", "error": str(exc),
+                })
+                cond = False
+            except (UnsafeExpression, SyntaxError, NameError, Exception) as exc:
+                trace("tool.expression.type_error", {
+                    "stage": "if", "error": repr(exc),
+                })
+                cond = False
+
+            if "then" in step or "else" in step:
+                branch = step.get("then") if cond else step.get("else")
+                if isinstance(branch, list):
+                    _walk_steps(
+                        branch,
+                        parent_args=effective_args,
+                        composite_param_defs=[],
+                        toolset=toolset,
+                        trace=trace, budget=budget,
+                        out=out, visiting=visiting,
+                        namespace=namespace,
+                        emit_after_events=emit_after_events,
+                        after_verb=after_verb,
+                    )
+            elif cond:
+                # Simple form: synthesize a single primitive step
+                _walk_steps(
+                    [{"do": step.get("do"), "args": step.get("args") or {}}],
+                    parent_args=effective_args,
+                    composite_param_defs=[],
+                    toolset=toolset,
+                    trace=trace, budget=budget,
+                    out=out, visiting=visiting,
+                    namespace=namespace,
+                    emit_after_events=emit_after_events,
+                    after_verb=after_verb,
+                )
+            continue
+
         verb = step.get("do")
         if not isinstance(verb, str):
-            # Validator caught this at deploy time; runtime is forgiving.
             continue
         step_args = step.get("args") or {}
         if not isinstance(step_args, dict):
@@ -219,31 +414,31 @@ def _walk_steps(
 
         if toolset.is_composite(verb):
             if verb in visiting:
-                # Defensive — validator catches cycles at deploy, but if the
-                # manifest got past validation somehow, blow the budget rather
-                # than infinite-loop.
                 raise _BudgetExceeded
             child = toolset.composites[verb]
-            child_args = _resolve_args_phase2(step_args, effective_args)
+            child_args = _resolve_args(step_args, effective_args, namespace)
             trace("tool.expanded", {"tool": verb, "args": child_args})
             _walk_steps(
                 child.steps,
                 parent_args=child_args,
                 composite_param_defs=child.parameters,
                 toolset=toolset,
-                trace=trace,
-                budget=budget,
-                out=out,
-                visiting=visiting | {verb},
+                trace=trace, budget=budget,
+                out=out, visiting=visiting | {verb},
+                namespace=namespace,
             )
             continue
 
         # Primitive step — emit a concrete action dict.
-        primitive_args = _resolve_args_phase2(step_args, effective_args)
+        primitive_args = _resolve_args(step_args, effective_args, namespace)
         action = {"do": verb}
         action.update(primitive_args)
         out.append(action)
         budget.charge_one()
+        if emit_after_events:
+            trace("tool.after.step", {
+                "verb": after_verb, "step": {"do": verb, "args": primitive_args},
+            })
 
 
 def _apply_defaults(
@@ -256,25 +451,67 @@ def _apply_defaults(
     return out
 
 
-def _resolve_args_phase2(
-    step_args: dict[str, Any], parent_args: dict[str, Any]
+_INTERP_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
+
+
+def _resolve_args(
+    step_args: dict[str, Any],
+    parent_args: dict[str, Any],
+    namespace: dict[str, Any],
 ) -> dict[str, Any]:
-    """Phase 2 arg resolution — only the simplest interpolation form
-    `"{{ args.X }}"` (whole-string replace, no expressions). The full
-    expression-DSL interpolation lands in Phase 3 with the sandbox helpers.
+    """GRAMMAR.md §5.3 interpolation:
+      • String values containing `{{ expr }}` — render through sandbox,
+        result coerced to string (each {{ }} block independently).
+      • Dict value `{_expr: "..."}` — evaluate; result keeps native type.
+      • Other values pass through.
     """
     out: dict[str, Any] = {}
     for k, v in step_args.items():
-        if isinstance(v, str):
-            stripped = v.strip()
-            if (
-                stripped.startswith("{{")
-                and stripped.endswith("}}")
-                and stripped[2:-2].strip().startswith("args.")
-            ):
-                ref = stripped[2:-2].strip()[len("args."):]
-                if ref in parent_args:
-                    out[k] = parent_args[ref]
-                    continue
-        out[k] = v
+        out[k] = _resolve_value(v, parent_args, namespace)
     return out
+
+
+def _resolve_value(
+    v: Any, parent_args: dict[str, Any], namespace: dict[str, Any],
+) -> Any:
+    if isinstance(v, dict) and set(v.keys()) == {"_expr"}:
+        try:
+            return sandbox_eval(
+                v["_expr"], namespace=namespace, args=parent_args,
+            )
+        except Exception:
+            return None
+    if isinstance(v, str) and "{{" in v:
+        return _interpolate_string(v, parent_args, namespace)
+    if isinstance(v, list):
+        return [_resolve_value(x, parent_args, namespace) for x in v]
+    if isinstance(v, dict):
+        return {k: _resolve_value(x, parent_args, namespace) for k, x in v.items()}
+    return v
+
+
+def _interpolate_string(
+    s: str, parent_args: dict[str, Any], namespace: dict[str, Any],
+) -> str:
+    """Replace each {{ expr }} with its evaluated value (cast to str).
+    If a single {{ }} block spans the whole string and the result is
+    not a string, return the native value — this preserves the common
+    case `{{ args.dest }}` for slug pass-through without stringifying."""
+    stripped = s.strip()
+    m = _INTERP_RE.fullmatch(stripped)
+    if m is not None:
+        expr = m.group(1).strip()
+        try:
+            return sandbox_eval(expr, namespace=namespace, args=parent_args)
+        except Exception:
+            return s
+
+    def _replace(match: re.Match) -> str:
+        expr = match.group(1).strip()
+        try:
+            value = sandbox_eval(expr, namespace=namespace, args=parent_args)
+        except Exception:
+            return match.group(0)
+        return str(value)
+
+    return _INTERP_RE.sub(_replace, s)

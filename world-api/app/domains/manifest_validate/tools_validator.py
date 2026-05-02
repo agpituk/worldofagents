@@ -1,31 +1,27 @@
 """Validator for the manifest's `tools:` section.
 
-Phase 2 (this module's first cut) covers:
+Covers (Phase 2 + Phase 3):
   • Shape parsing via `arena_bot.tool_schema.parse_tools`.
   • Name uniqueness across `tools[]`.
   • Composite step `do:` resolves to a primitive verb or a sibling
     composite (no cycles, no `invoke_llm`).
   • Cycle detection in the composite-call DAG.
   • Expansion-depth budget (≤ 16 primitives).
-
-Phase 3 will add:
-  • Expression validation through `compile_safe` for `when` / `clamp`
-    expressions.
-  • Per-verb clampable-parameter table.
-  • `if`-step expression checks.
-
-Until then, any tool entry that sets `when`, `clamp`, `after`, or uses
-`if`-step inside a composite is rejected with a Phase-3-pending error.
+  • Override grammar: `when`, `clamp`, `after`, `if`-step.
+  • Expression syntax via `compile_safe` (existing reflex sandbox).
+  • Per-verb clampable params via `clamp_table.CLAMP_TABLE`.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from app.domains.manifest_validate.clamp_table import CLAMP_TABLE, is_clampable
 from app.domains.manifest_validate.shared import META_VERBS
 
 # Importing the SDK module so server + SDK use the same parser. The
 # bot-sdk-python package is on PYTHONPATH inside this monorepo.
+from arena_bot.reflex_sandbox import UnsafeExpression, compile_safe  # type: ignore
 from arena_bot.tool_schema import (  # type: ignore
     CompositeTool,
     OverrideTool,
@@ -45,8 +41,19 @@ def _issue(severity: str, message: str, path: str | None = None) -> dict[str, An
     return out
 
 
-# Phase-2 cap. Phase 3 lifts this when the override-grammar lands.
-PHASE_2_FORBIDDEN_FIELDS = ("when", "clamp", "after")
+def _check_expr(expr: str, path: str) -> list[dict[str, Any]]:
+    """Best-effort syntax check via the reflex sandbox. Catches AST
+    violations and parse errors at deploy time; runtime evaluation
+    handles dynamic type errors via `tool.expression.type_error`."""
+    if not isinstance(expr, str) or not expr.strip():
+        return [_issue("error", "expression must be a non-empty string", path=path)]
+    try:
+        compile_safe(expr)
+    except UnsafeExpression as exc:
+        return [_issue("error", f"unsafe expression: {exc}", path=path)]
+    except SyntaxError as exc:
+        return [_issue("error", f"expression syntax error: {exc.msg}", path=path)]
+    return []
 
 
 def validate_tools(
@@ -103,7 +110,7 @@ def validate_tools(
     for i, tool in enumerate(parsed):
         path = f"tools[{i}]"
         if isinstance(tool, OverrideTool):
-            issues.extend(_validate_override(tool, path, valid_verbs))
+            issues.extend(_validate_override(tool, path, valid_verbs, composite_names))
         else:
             issues.extend(_validate_composite(tool, path, valid_verbs, composite_names))
 
@@ -138,6 +145,7 @@ def _validate_override(
     tool: OverrideTool,
     path: str,
     valid_verbs: set[str],
+    composite_names: set[str],
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
@@ -147,31 +155,43 @@ def _validate_override(
             f"cannot override meta-verb '{tool.override_verb}'",
             path=f"{path}.override",
         ))
-    elif tool.override_verb not in valid_verbs:
+        return out
+    if tool.override_verb not in valid_verbs:
         out.append(_issue(
             "error",
             f"unknown verb '{tool.override_verb}'",
             path=f"{path}.override",
         ))
+        return out
 
-    # Phase 2 — reject grammar that's not landed yet
+    # `when:` — must be a syntactically valid sandbox expression.
     if tool.when_expr is not None:
-        out.append(_issue(
-            "error",
-            "`when:` is part of the Phase 3 override grammar — not yet live",
-            path=f"{path}.when",
-        ))
-    if tool.clamp:
-        out.append(_issue(
-            "error",
-            "`clamp:` is part of the Phase 3 override grammar — not yet live",
-            path=f"{path}.clamp",
-        ))
-    if tool.after:
-        out.append(_issue(
-            "error",
-            "`after:` is part of the Phase 3 override grammar — not yet live",
-            path=f"{path}.after",
+        out.extend(_check_expr(tool.when_expr, f"{path}.when"))
+
+    # `clamp:` — every key must be a clampable param of this verb;
+    # every value must be a valid expression.
+    for param_name, expr in tool.clamp.items():
+        if not is_clampable(tool.override_verb, param_name):
+            allowed = sorted(CLAMP_TABLE.get(tool.override_verb, {}).keys())
+            out.append(_issue(
+                "error",
+                f"'{param_name}' is not a clampable parameter of '{tool.override_verb}' "
+                f"(allowed: {allowed})",
+                path=f"{path}.clamp.{param_name}",
+            ))
+            continue
+        out.extend(_check_expr(expr, f"{path}.clamp.{param_name}"))
+
+    # `after:` — list of step dicts; each step must resolve like a composite step,
+    # but cannot reference the verb being overridden (would loop).
+    for i, step in enumerate(tool.after):
+        out.extend(_validate_step(
+            step,
+            f"{path}.after[{i}]",
+            valid_verbs=valid_verbs,
+            composite_names=composite_names,
+            self_name=tool.override_verb,
+            allow_after_chain=False,
         ))
 
     return out
@@ -199,6 +219,7 @@ def _validate_composite(
             valid_verbs=valid_verbs,
             composite_names=composite_names,
             self_name=tool.name,
+            allow_after_chain=True,
         ))
 
     return out
@@ -211,38 +232,82 @@ def _validate_step(
     valid_verbs: set[str],
     composite_names: set[str],
     self_name: str,
+    allow_after_chain: bool,
 ) -> list[dict[str, Any]]:
+    """Validate one step entry. `allow_after_chain` tells us whether we're
+    inside a composite's `steps:` (where if-steps are allowed) vs an
+    override's `after:` (no nested `if-then-else` per GRAMMAR.md §4)."""
     out: list[dict[str, Any]] = []
 
     if "if" in step:
-        # Phase 2 — `if`-step is part of the override grammar surface and
-        # not yet supported in composites. Phase 3 lifts.
-        out.append(_issue(
-            "error",
-            "`if`-step in composites is part of the Phase 3 grammar — not yet live",
-            path=f"{path}.if",
-        ))
+        # Validate the condition expression
+        out.extend(_check_expr(step["if"], f"{path}.if"))
+
+        if "then" in step or "else" in step:
+            # Full form
+            for branch_name in ("then", "else"):
+                branch = step.get(branch_name) or []
+                if not isinstance(branch, list):
+                    continue
+                for j, inner in enumerate(branch):
+                    if not isinstance(inner, dict):
+                        continue
+                    out.extend(_validate_step(
+                        inner, f"{path}.{branch_name}[{j}]",
+                        valid_verbs=valid_verbs,
+                        composite_names=composite_names,
+                        self_name=self_name,
+                        allow_after_chain=allow_after_chain,
+                    ))
+        else:
+            # Simple form: if + do
+            verb = step.get("do")
+            if isinstance(verb, str):
+                out.extend(_check_step_verb(
+                    verb, f"{path}.do",
+                    valid_verbs=valid_verbs,
+                    composite_names=composite_names,
+                    self_name=self_name,
+                ))
         return out
 
     verb = step.get("do")
+    if isinstance(verb, str):
+        out.extend(_check_step_verb(
+            verb, f"{path}.do",
+            valid_verbs=valid_verbs,
+            composite_names=composite_names,
+            self_name=self_name,
+        ))
+    return out
+
+
+def _check_step_verb(
+    verb: str,
+    path: str,
+    *,
+    valid_verbs: set[str],
+    composite_names: set[str],
+    self_name: str,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     if verb in META_VERBS:
         out.append(_issue(
             "error",
-            f"composite step cannot use meta-verb '{verb}' — composites chain "
-            f"primitives only",
-            path=f"{path}.do",
+            f"step cannot use meta-verb '{verb}' — composites chain primitives only",
+            path=path,
         ))
     elif verb == self_name:
         out.append(_issue(
             "error",
-            f"composite step references itself ('{self_name}') — would loop",
-            path=f"{path}.do",
+            f"step references itself ('{self_name}') — would loop",
+            path=path,
         ))
     elif verb not in valid_verbs and verb not in composite_names:
         out.append(_issue(
             "error",
             f"unknown verb '{verb}' (not a primitive nor a composite in this manifest)",
-            path=f"{path}.do",
+            path=path,
         ))
     return out
 
@@ -252,6 +317,22 @@ def _validate_step(
 # ---------------------------------------------------------------------------
 
 
+def _walk_step_composite_refs(step: dict[str, Any], composites: dict[str, CompositeTool]) -> set[str]:
+    """Collect composite-tool references in a step (handles if-step
+    full + simple forms)."""
+    refs: set[str] = set()
+    if "if" in step and ("then" in step or "else" in step):
+        for branch in (step.get("then") or [], step.get("else") or []):
+            for inner in branch:
+                if isinstance(inner, dict):
+                    refs |= _walk_step_composite_refs(inner, composites)
+        return refs
+    do = step.get("do")
+    if isinstance(do, str) and do in composites:
+        refs.add(do)
+    return refs
+
+
 def _detect_cycles(
     composites: dict[str, CompositeTool],
 ) -> list[dict[str, Any]]:
@@ -259,10 +340,8 @@ def _detect_cycles(
     for name, tool in composites.items():
         refs: set[str] = set()
         for step in tool.steps:
-            if isinstance(step, dict) and isinstance(step.get("do"), str):
-                d = step["do"]
-                if d in composites:
-                    refs.add(d)
+            if isinstance(step, dict):
+                refs |= _walk_step_composite_refs(step, composites)
         graph[name] = refs
 
     out: list[dict[str, Any]] = []
@@ -310,14 +389,39 @@ def _max_expansion_depth(
         # Defensive — cycle should have been caught upstream.
         return 0
     visiting = visiting | {tool.name}
+    return _step_list_depth(tool.steps, composites, visiting)
+
+
+def _step_list_depth(
+    steps: list[dict[str, Any]],
+    composites: dict[str, CompositeTool],
+    visiting: set[str],
+) -> int:
     total = 0
-    for step in tool.steps:
-        if isinstance(step, dict):
-            verb = step.get("do")
-            if isinstance(verb, str) and verb in composites:
-                total += _max_expansion_depth(
-                    composites[verb], composites, visiting
-                )
-            else:
-                total += 1
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        total += _step_depth(step, composites, visiting)
     return total
+
+
+def _step_depth(
+    step: dict[str, Any],
+    composites: dict[str, CompositeTool],
+    visiting: set[str],
+) -> int:
+    if "if" in step and ("then" in step or "else" in step):
+        # Worst-case branch.
+        then_d = _step_list_depth(step.get("then") or [], composites, visiting)
+        else_d = _step_list_depth(step.get("else") or [], composites, visiting)
+        return max(then_d, else_d)
+    if "if" in step:
+        # Simple if + do — worst case is "do fires".
+        verb = step.get("do")
+        if isinstance(verb, str) and verb in composites:
+            return _max_expansion_depth(composites[verb], composites, visiting)
+        return 1
+    verb = step.get("do")
+    if isinstance(verb, str) and verb in composites:
+        return _max_expansion_depth(composites[verb], composites, visiting)
+    return 1
