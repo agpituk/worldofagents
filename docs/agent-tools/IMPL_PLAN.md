@@ -522,6 +522,83 @@ Items explicitly outside this pass:
 | 1 — block editor (lite) | **shipped (minimal)** — superseded by Phase 4 below | Tools preview cards on /deploy showing per-tool kind, step/param/clamp counts, descriptions. Surfaces parsed tool structure from the validator response. NO Blockly. |
 | 1 + 4 — full block editor | **shipped** | Blockly@11 lazy-loaded on /deploy and hero pages. Block kinds for all 44 verbs (auto-generated from VERB_SPECS), reflex/ability/composite/override containers, when_gate/clamp_param/after_chain, if_step (simple + full), arith/min_max/raw_expression. yamlToBlocks/blocksToYaml round-trip with vitest CI assertion (27 tests, including all `bot-sdk-python/examples/*.yaml` manifests). Split-pane Blockly + Monaco YAML editor on /deploy. HeroBlocksRO read-only render on hero pages. |
 
-Final test counts: **127 world-api + 81 SDK + 27 frontend = 235 tests passing.**
+Final test counts: **187 world-api + 90 SDK + 27 frontend = 304 tests passing.**
 
 Branches / commits live on `feature/agent-tools` for the user to review whole.
+
+---
+
+## 9. Gap-closure pass — closes everything in §7's "explicitly outside" list
+
+After delivery the user requested "full implementation, ready for people to
+play and enjoy". This section lists what landed in commits 5ffb7e1
+through this point.
+
+**Backend ergonomics (`bot-sdk-python/`)**:
+- `user_tools.py` — `@user_tool`, `@override`, `@when`, `@clamp`,
+  `@after`, `param()`. All four override decorators tolerate any
+  stacking order via shared `_ensure_override_entry`.
+- `cli.py` + `arena-bot` script — `manifest dump`, `manifest validate`,
+  `tools simulate` subcommands.
+- 9 tests covering decorator collection, YAML emission, CLI commands.
+
+**Backend endpoints**:
+- `GET /admin/hero/{id}/tool-spec` — proves docstring overrides apply.
+- `POST /manifest/simulate-tick` — synthetic-perception dry-run.
+
+**Showcase (`world-api/app/domains/showcase/`)**:
+- Copy flow now appends to the target hero's manifest (with
+  `_meta.parent_tool_id` lineage) and returns a `rename_to` prompt on
+  collision.
+- 4 new boards live: `most_called`, `highest_lift` (with honesty
+  banner), `david`, `best_named`.
+- `GET /api/tools-gallery` — featured + new&noteworthy + by-category
+  with keyword inference.
+- `GET /api/compare?heroes=a,b,c` — side-by-side panels with shared-
+  tools section and identical/forked diff flag.
+- `hero.tool_visibility=private` excludes from indexing and shows
+  "tool list private" in /compare.
+
+**Showcase frontend**:
+- `/tools/gallery` page with category filter.
+- `/compare` page with HeroBlocksRO diff panels.
+- `<CopyToolModal>` wired into `/tools/[toolId]` with hero picker
+  and rename-on-conflict retry.
+
+**Inspector polish**:
+- `<TraceTree>` — structured nested rendering with color-coded events.
+- `<ToolStatsChart>` — CSS-only tick-distribution histogram.
+- `<ToolDetailDrawer>` — slide-over with three tabs (Definition /
+  Recent / Stats), replaces inline expansion.
+- "Debug this choice →" link on EventStream LLM-call events.
+
+**Block editor polish**:
+- `do_composite` now a live FieldDropdown of workspace composites.
+- `tool_override` tooltip refreshes per-verb to list clampable params.
+- Stable block IDs (`tools_N`, `reflex_N`, `ability_<name>`) in
+  yamlToBlocks; `BlockEditor` accepts `validationIssues` and calls
+  `setWarningText` on the offending blocks.
+- First-tick `<SimulationPanel>` on `/deploy` debounced 600ms against
+  the new `/manifest/simulate-tick` endpoint.
+
+**Tests**:
+- All 5 `GRAMMAR.md §11` worked examples land as a single integration
+  test (`test_grammar_worked_examples.py`).
+- Property tests over random-valid + random-invalid manifests
+  (`test_validator_property.py`, 46 cases).
+
+Final commit graph on `feature/agent-tools` (top is most recent):
+```
+e88717d block editor polish: simulation panel + dynamic dropdowns + error highlights
+56040d7 inspector polish: TraceTree + ToolStatsChart + slide-over drawer
+9c436db showcase: actual copy flow + 4 leaderboards live + /compare + gallery + visibility
+5ffb7e1 backend gap-closure: SDK decorators, arena-bot CLI, debug endpoint, GRAMMAR §11 integration
+ce44d3b phase4: full Blockly block editor for reflexes, abilities, tools
+41461b9 phase1-lite: tools preview cards on /deploy
+e3ea8df phase6: showcase layer — leaderboards, content-addressed tool registry
+e77c2fe phase5: tool inspector + per-tick LLM debugger
+6f0c75e docs(agent-tools): pivot phase order
+7b067b7 phase3: backend override grammar
+39cab7f phase2: backend composites + docstring overrides
+2973dbe docs(agent-tools): add IMPL_PLAN.md
+```
