@@ -61,6 +61,14 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
       (e.kind === "tick" && e.data?.hero_id === id),
   );
 
+  // P0-3 step 3 surface: "your model emitted invalid JSON N times" —
+  // a running tally of parse failures lets a player notice immediately
+  // when their manifest+model combo is fragile, without having to scan
+  // the feed for individual rows.
+  const parseFailureCount = heroLines.filter(
+    (e) => e.kind === "tick" && e.data?.kind === "parse_failure",
+  ).length;
+
   useEffect(() => {
     const el = feedRef.current;
     if (!el) return;
@@ -416,7 +424,17 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
       <section className="border-l border-border pl-6 min-h-[60vh]">
         <div className="flex items-baseline justify-between mb-3">
           <h2 className="text-sm uppercase tracking-wider text-fg-muted">recent activity</h2>
-          <span className={`text-xs ${status === "open" ? "text-emerald-400" : status === "connecting" ? "text-amber" : "text-rose-400"}`}>● {status}</span>
+          <div className="flex items-center gap-3">
+            {parseFailureCount > 0 && (
+              <span
+                className="text-xs text-rose-400 font-mono"
+                title="LLM output that didn't parse cleanly. Click an entry below for the raw output."
+              >
+                ⚠ {parseFailureCount} parse {parseFailureCount === 1 ? "failure" : "failures"}
+              </span>
+            )}
+            <span className={`text-xs ${status === "open" ? "text-emerald-400" : status === "connecting" ? "text-amber" : "text-rose-400"}`}>● {status}</span>
+          </div>
         </div>
         {heroLines.length === 0 ? (
           <p className="text-sm text-fg-muted italic">
@@ -429,17 +447,44 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
           >
             {heroLines.map((e, i) => {
               const debug = e.data?.payload?.debug;
+              const isParseFailure =
+                e.kind === "tick" && e.data?.kind === "parse_failure";
               return (
-                <li key={`${e.ts}-${i}`} className="text-sm leading-relaxed">
+                <li
+                  key={`${e.ts}-${i}`}
+                  className={`text-sm leading-relaxed ${
+                    isParseFailure
+                      ? "border-l-2 border-rose-500 pl-2 -ml-2"
+                      : ""
+                  }`}
+                >
                   <span className="text-xs text-amber-dim mr-2 font-mono">t{e.data?.tick_id}</span>
                   {e.kind === "narrator" ? (
                     <span>{e.data?.text}</span>
+                  ) : isParseFailure ? (
+                    <span>
+                      <span className="text-rose-400 font-medium">parse failure</span>
+                      <span className="text-fg-muted"> · {e.data?.payload?.reason ?? "unknown"}</span>
+                      {e.data?.payload?.error && (
+                        <span className="text-fg-muted"> · {String(e.data.payload.error)}</span>
+                      )}
+                      {e.data?.payload?.raw_output && (
+                        <details className="mt-1 ml-6 text-xs font-mono text-rose-300/70">
+                          <summary className="cursor-pointer text-rose-400/80 hover:text-rose-300">
+                            raw output
+                          </summary>
+                          <pre className="mt-1 whitespace-pre-wrap break-all">
+                            {String(e.data.payload.raw_output).slice(0, 500)}
+                          </pre>
+                        </details>
+                      )}
+                    </span>
                   ) : (
                     <span className="text-fg-muted">
                       {e.data?.kind} · {JSON.stringify(e.data?.payload?.outcome ?? e.data?.payload).slice(0, 100)}
                     </span>
                   )}
-                  {debug && (
+                  {debug && !isParseFailure && (
                     <div className="mt-1 ml-6 text-xs font-mono text-amber-dim">
                       ↪ reflex #{debug.reflex_index}
                       {debug.when && (

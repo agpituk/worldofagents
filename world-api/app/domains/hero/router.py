@@ -395,6 +395,17 @@ async def _handle_inbound(raw: str, hero_id: str) -> None:
 
     debug = msg.get("debug")  # optional reflex-debugger metadata from the SDK
 
+    # If the SDK couldn't parse the model's output, mirror that into a
+    # distinct parse_failure event so the spectator stream surfaces the
+    # "wasted tick" instead of swallowing it as a silent wait.
+    parse_failure_payload: dict[str, Any] | None = None
+    if isinstance(debug, dict) and debug.get("parse_error"):
+        parse_failure_payload = {
+            "reason": str(debug.get("parse_error")),
+            "raw_output": str(debug.get("raw_output", ""))[:500],
+            "fallback_action": action,
+        }
+
     # Persist the submission as an event (audit trail) ...
     db_gen = get_db()
     db = next(db_gen)
@@ -414,6 +425,16 @@ async def _handle_inbound(raw: str, hero_id: str) -> None:
                 },
             )
         )
+        if parse_failure_payload is not None:
+            db.add(
+                Event(
+                    tick_id=int(tick_id) if tick_id is not None else 0,
+                    hero_id=uuid.UUID(hero_id),
+                    zone=None,
+                    kind="parse_failure",
+                    payload=parse_failure_payload,
+                )
+            )
         db.commit()
     finally:
         try:

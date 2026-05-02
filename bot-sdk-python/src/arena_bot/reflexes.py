@@ -272,9 +272,28 @@ def resolve_action(action: dict[str, Any], perception) -> dict[str, Any]:
 INVOKE_LLM = "invoke_llm"
 
 
+_CALL_LIMIT_PER_EVAL = 200
+
+
 class ReflexEngine:
     def __init__(self, specs: list[dict[str, Any]]):
         self.specs = specs or []
+        # Pre-compile every `when` expression once at construction so a
+        # manifest with an unsafe AST or a syntax error fails LOUDLY at
+        # deploy time, not silently each tick. Slot is None when compile
+        # failed; evaluate logs and skips those reflexes.
+        from arena_bot.reflex_sandbox import UnsafeExpression, compile_safe
+        self._compiled: list[Any] = []
+        for i, spec in enumerate(self.specs):
+            expr = (spec or {}).get("when")
+            if not expr:
+                self._compiled.append(None)
+                continue
+            try:
+                self._compiled.append(compile_safe(expr))
+            except (SyntaxError, UnsafeExpression) as exc:
+                log.warning("reflex %d ('%s') refused: %s", i, expr, exc)
+                self._compiled.append(None)
 
     def evaluate(self, perception) -> dict[str, Any] | None:
         action, _debug = self.evaluate_with_debug(perception)
@@ -284,13 +303,26 @@ class ReflexEngine:
         """Returns (action, debug_info). debug_info names the index, the `when`
         expression, and the resolved action — for the spectator UI's reflex
         debugger and for player iteration."""
-        ctx = build_context(perception)
+        from arena_bot.reflex_sandbox import (
+            CallCounter, CallLimitExceeded, wrap_callables,
+        )
+
+        raw_ctx = build_context(perception)
         for i, spec in enumerate(self.specs):
             expr = spec.get("when")
             if not expr:
                 continue
+            code = self._compiled[i]
+            if code is None:
+                # Refused at compile time — already logged, just skip.
+                continue
+            counter = CallCounter(_CALL_LIMIT_PER_EVAL)
+            ctx = wrap_callables(raw_ctx, counter)
             try:
-                matched = bool(eval(expr, {"__builtins__": {}}, ctx))  # noqa: S307
+                matched = bool(eval(code, {"__builtins__": {}}, ctx))  # noqa: S307
+            except CallLimitExceeded as exc:
+                log.warning("reflex %d ('%s') %s — disabled this tick", i, expr, exc)
+                continue
             except Exception as exc:
                 log.warning("reflex %d ('%s') eval error: %s", i, expr, exc)
                 continue

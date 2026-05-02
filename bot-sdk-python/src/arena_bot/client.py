@@ -46,6 +46,9 @@ class Perception:
     your_state: dict[str, Any]
     perception: dict[str, Any]
     deadline_ms: int
+    # World-api-signed cap on max_tokens for any /think call this tick.
+    # The SDK forwards it to the gateway, which enforces.
+    gateway_permission_token: str | None = None
 
 
 @dataclass
@@ -68,17 +71,45 @@ class Decision:
 
 
 # ---------------------------------------------------------------------------
-# JSON action parser (tolerant of code fences and surrounding prose)
+# JSON action parser (tolerant of code fences; structured failure reporting)
 # ---------------------------------------------------------------------------
 
 _OBJECT_RE = re.compile(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", re.DOTALL)
 
+# Failure-mode taxonomy. Stable strings — they end up in events that the
+# spectator UI will eventually render, and players will read them looking
+# for "why is my hero waiting?". Don't reword these casually.
+PARSE_REASON_EMPTY = "empty"
+PARSE_REASON_NO_JSON = "no_json_found"
+PARSE_REASON_INVALID_JSON = "invalid_json"
+PARSE_REASON_NOT_OBJECT = "not_an_object"
+PARSE_REASON_MISSING_DO = "missing_do"
+PARSE_REASON_MULTIPLE_OBJECTS = "multiple_objects"
+
+
+class ParseError(ValueError):
+    """A structured LLM-output parse failure.
+
+    Subclasses ValueError so existing `except ValueError` blocks still
+    catch it, but carries the failure reason and a truncated raw output
+    so callers can build a ParseFailure event the spectator can read.
+    """
+
+    def __init__(self, reason: str, *, raw_output: str = "", message: str | None = None) -> None:
+        self.reason = reason
+        self.raw_output = (raw_output or "")[:500]
+        super().__init__(message or f"{reason}: {self.raw_output[:120]!r}")
+
 
 def parse_json_action(text: str) -> dict[str, Any]:
-    if not text:
-        raise ValueError("empty completion")
-    text = text.strip()
-    # Strip a leading code fence if present.
+    """Parse the LLM's completion into an action dict, raising ParseError
+    with a stable `reason` so the world can record what went wrong rather
+    than silently waiting."""
+    raw = text or ""
+    if not raw or not raw.strip():
+        raise ParseError(PARSE_REASON_EMPTY, raw_output=raw)
+    text = raw.strip()
+    # Strip a leading/trailing code fence if present.
     if text.startswith("```"):
         lines = text.split("\n")
         if lines and lines[0].startswith("```"):
@@ -86,18 +117,39 @@ def parse_json_action(text: str) -> dict[str, Any]:
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    # Try whole-string parse first.
+
+    # Try a whole-string parse first — the strict path. If the model
+    # behaved, this is where the parse succeeds.
+    obj: Any
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
-        m = _OBJECT_RE.search(text)
-        if not m:
-            raise ValueError(f"no JSON object found in: {text[:200]!r}") from None
-        obj = json.loads(m.group(0))
+        # Fall back to first-object regex extraction; flag if there are
+        # multiple top-level JSON objects so a second-action smuggle is
+        # legible rather than silent.
+        matches = _OBJECT_RE.findall(text)
+        if not matches:
+            raise ParseError(PARSE_REASON_NO_JSON, raw_output=raw) from None
+        if len(matches) > 1:
+            raise ParseError(
+                PARSE_REASON_MULTIPLE_OBJECTS, raw_output=raw,
+                message=f"{len(matches)} JSON objects in output; refusing to guess",
+            ) from None
+        try:
+            obj = json.loads(matches[0])
+        except json.JSONDecodeError as exc:
+            raise ParseError(PARSE_REASON_INVALID_JSON, raw_output=raw) from exc
+
     if not isinstance(obj, dict):
-        raise ValueError(f"expected object, got {type(obj).__name__}")
+        raise ParseError(
+            PARSE_REASON_NOT_OBJECT, raw_output=raw,
+            message=f"expected object, got {type(obj).__name__}",
+        )
     if "do" not in obj:
-        raise ValueError(f"missing 'do' field: {obj}")
+        raise ParseError(
+            PARSE_REASON_MISSING_DO, raw_output=raw,
+            message=f"missing 'do' field in {obj!r}",
+        )
     return obj
 
 
@@ -430,6 +482,7 @@ class Hero:
                                 your_state=msg["your_state"],
                                 perception=msg["perception"],
                                 deadline_ms=msg["deadline_ms"],
+                                gateway_permission_token=msg.get("gateway_permission_token"),
                             )
                             await self._handle_perception(ws, p)
                         else:
@@ -457,10 +510,17 @@ class Hero:
         tool_choice: str | dict[str, Any] | None = None,
         tick_id: int | None = None,
         retries: int = 3,
+        permission_token: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Call the gateway. Retries up to `retries` times on 502/503/504/timeout
         with exponential backoff (0.5s → 1s → 2s) so a brief llamafile blip
-        doesn't deadlock the bot."""
+        doesn't deadlock the bot.
+
+        `permission_token` is the world-api-signed cap on max_tokens for this
+        tick; the gateway rejects calls that exceed it. Callers should pass
+        `perception.gateway_permission_token` through.
+        """
         import asyncio as _asyncio
 
         payload: dict[str, Any] = {
@@ -473,6 +533,10 @@ class Hero:
             payload["tools"] = tools
             if tool_choice is not None:
                 payload["tool_choice"] = tool_choice
+        if permission_token is not None:
+            payload["permission_token"] = permission_token
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         backoff = 0.5
         last_exc: Exception | None = None
@@ -516,13 +580,23 @@ class Hero:
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         try:
-            body = await self.think(messages=messages, model=model, tick_id=perception.tick_id)
-            action = parse_json_action(body["completion"])
-            log.info("LLM picked: %s", action)
-            return Decision(kind="llm", action=action, gateway_token=body["gateway_token"])
-        except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
-            log.warning("LLM action failed (%s) — falling back to %s", exc, fallback)
+            body = await self.think(
+                messages=messages, model=model, tick_id=perception.tick_id,
+                permission_token=perception.gateway_permission_token,
+            )
+        except httpx.HTTPError as exc:
+            log.warning("LLM action HTTP failed (%s) — falling back to %s", exc, fallback)
             return Decision(kind="reflex", action=fallback)
+        try:
+            action = parse_json_action(body["completion"])
+        except ParseError as exc:
+            log.warning("LLM action parse failed (%s) — emitting parse_failure", exc)
+            return Decision(
+                kind="reflex", action=fallback,
+                debug={"parse_error": exc.reason, "raw_output": exc.raw_output},
+            )
+        log.info("LLM picked: %s", action)
+        return Decision(kind="llm", action=action, gateway_token=body["gateway_token"])
 
     async def llm_tool_action(
         self,
@@ -559,6 +633,7 @@ class Hero:
                 tools=specs,
                 tool_choice="auto",
                 tick_id=perception.tick_id,
+                permission_token=perception.gateway_permission_token,
             )
         except httpx.HTTPError as exc:
             log.warning("LLM tool action HTTP failed (%s) — falling back", exc)
@@ -571,22 +646,34 @@ class Hero:
             try:
                 action = parse_json_action(body.get("completion", ""))
                 return Decision(kind="llm", action=action, gateway_token=body["gateway_token"])
-            except ValueError:
-                log.warning("LLM returned no tool_calls AND no parseable text — falling back")
-                return Decision(kind="reflex", action=fallback)
+            except ParseError as exc:
+                log.warning("no tool_calls and free-text unparseable (%s)", exc)
+                return Decision(
+                    kind="reflex", action=fallback,
+                    debug={"parse_error": exc.reason, "raw_output": exc.raw_output},
+                )
 
         first = tool_calls[0]
         fn = index.get(first.get("name", ""))
         if fn is None:
             log.warning("LLM picked unknown tool %r — falling back", first.get("name"))
-            return Decision(kind="reflex", action=fallback)
+            return Decision(
+                kind="reflex", action=fallback,
+                debug={"parse_error": "unknown_tool",
+                       "raw_output": str(first.get("name", ""))[:500]},
+            )
 
         try:
             action = fn(**(first.get("arguments") or {}))
         except TypeError as exc:
             log.warning("tool '%s' rejected args %s (%s) — falling back",
                         first.get("name"), first.get("arguments"), exc)
-            return Decision(kind="reflex", action=fallback)
+            return Decision(
+                kind="reflex", action=fallback,
+                debug={"parse_error": "bad_tool_args",
+                       "raw_output": json.dumps({"name": first.get("name"),
+                                                 "arguments": first.get("arguments")})[:500]},
+            )
 
         log.info("LLM picked tool: %s(%s) → %s",
                  first.get("name"), first.get("arguments"), action)
