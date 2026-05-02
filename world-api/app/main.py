@@ -17,6 +17,7 @@ from app.core.tick import tick_engine
 from app.domains.bounty import router as bounty_router
 from app.domains.contract import router as contract_router
 from app.domains.inspector import router as inspector_router
+from app.domains.showcase import router as showcase_router
 from app.domains.manifest_validate import (
     admin_router as manifest_admin_router,
     router as manifest_validate_router,
@@ -112,5 +113,6 @@ app.include_router(contract_router)
 app.include_router(manifest_validate_router)
 app.include_router(manifest_admin_router)
 app.include_router(inspector_router)
+app.include_router(showcase_router)
 app.include_router(world_event_router)
 app.include_router(highlight_router)
