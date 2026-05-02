@@ -308,6 +308,154 @@ SEED_NPCS = [
         "loot_gold": 1,
         "tameable": True,
     },
+    # ── Phase 3 — bestiary expansion ─────────────────────────────────────
+    # Six archetypes with deliberately distinct counter-play signatures so
+    # different builds shine in different rooms. Each entry seeds 1-2 mobs
+    # of that kind across the new zones.
+    #
+    # Skeleton (high AC, slow): rewards crushing damage + debuff. Crypt.
+    {
+        "slug": "skeleton_a",
+        "name": "Cracked Skeleton",
+        "kind": "mob",
+        "zone": "crypt_lower",
+        "pos_x": 3, "pos_y": 3,
+        "description": (
+            "Bone armour rattles with each step. Slow, but the iron "
+            "underplate turns most blades."
+        ),
+        "hostility": "hostile",
+        "hp_max": 14, "hp_current": 14, "ac": 16,  # high AC = needs better attacker
+        "attack_bonus": 2, "damage_dice": "1d6",
+        "loot_gold": 3,
+        "tameable": False,
+    },
+    {
+        "slug": "skeleton_b",
+        "name": "Cracked Skeleton",
+        "kind": "mob",
+        "zone": "crypt_lower",
+        "pos_x": 7, "pos_y": 4,
+        "description": "Another. The crypt is full of them.",
+        "hostility": "hostile",
+        "hp_max": 14, "hp_current": 14, "ac": 16,
+        "attack_bonus": 2, "damage_dice": "1d6",
+        "loot_gold": 3,
+        "tameable": False,
+    },
+    # Shade (spell-resistant, dodgy): rewards melee + true-strike.
+    {
+        "slug": "shade_a",
+        "name": "Hush-Wood Shade",
+        "kind": "mob",
+        "zone": "hush_wood",
+        "pos_x": 10, "pos_y": 5,
+        "description": (
+            "A smear of dusk between the trees. Spells slide off it; only "
+            "iron in hand seems to bite."
+        ),
+        "hostility": "hostile",
+        "hp_max": 10, "hp_current": 10, "ac": 14,
+        "attack_bonus": 3, "damage_dice": "1d6",
+        "loot_gold": 2,
+        "tameable": False,
+        "factions_aligned": {"wardens": -1},
+    },
+    # Boar (charges, high HP): rewards ranged kiting.
+    {
+        "slug": "boar_a",
+        "name": "Tusked Boar",
+        "kind": "mob",
+        "zone": "mire",
+        "pos_x": 4, "pos_y": 6,
+        "description": (
+            "Bristled, mud-caked, eight stone of muscle. Charges in straight "
+            "lines and barrels through anything light enough to fold."
+        ),
+        "hostility": "hostile",
+        "hp_max": 22, "hp_current": 22, "ac": 12,
+        "attack_bonus": 2, "damage_dice": "1d8",
+        "loot_gold": 5,
+        "tameable": True,  # legendary tame
+    },
+    {
+        "slug": "boar_b",
+        "name": "Tusked Boar",
+        "kind": "mob",
+        "zone": "mire",
+        "pos_x": 9, "pos_y": 9,
+        "description": "Older, scarred from a hunter's spear. Twice as wary.",
+        "hostility": "hostile",
+        "hp_max": 22, "hp_current": 22, "ac": 12,
+        "attack_bonus": 2, "damage_dice": "1d8",
+        "loot_gold": 5,
+        "tameable": True,
+    },
+    # Brigand (uses items, drops gold): rewards bribes / parley.
+    {
+        "slug": "brigand_a",
+        "name": "Brigand",
+        "kind": "mob",
+        "zone": "bandit_camp",
+        "pos_x": 4, "pos_y": 4,
+        "description": (
+            "Stolen jerkin, stolen blade, stolen accent. Will fight for "
+            "coin or run when there's better odds elsewhere."
+        ),
+        "hostility": "hostile",
+        "hp_max": 12, "hp_current": 12, "ac": 13,
+        "attack_bonus": 2, "damage_dice": "1d6",
+        "loot_gold": 12,  # carries real coin
+        "tameable": False,
+    },
+    {
+        "slug": "brigand_b",
+        "name": "Brigand",
+        "kind": "mob",
+        "zone": "bandit_camp",
+        "pos_x": 7, "pos_y": 6,
+        "description": "A second from the same crew.",
+        "hostility": "hostile",
+        "hp_max": 12, "hp_current": 12, "ac": 13,
+        "attack_bonus": 2, "damage_dice": "1d6",
+        "loot_gold": 12,
+        "tameable": False,
+    },
+    # Cultist-in-the-mire (casts back): rewards silence/interrupt.
+    {
+        "slug": "mire_cultist_a",
+        "name": "Mire Cultist",
+        "kind": "mob",
+        "zone": "mire",
+        "pos_x": 7, "pos_y": 3,
+        "description": (
+            "Robe stained with peat and ash. Whispers a litany the wind "
+            "carries further than it should."
+        ),
+        "hostility": "hostile",
+        "hp_max": 11, "hp_current": 11, "ac": 12,
+        "attack_bonus": 3, "damage_dice": "1d6",
+        "loot_gold": 4,
+        "tameable": False,
+        "factions_aligned": {"council": 2, "wardens": 1, "embered": -2},
+    },
+    # Revenant (rare, named loot): a group fight.
+    {
+        "slug": "revenant_a",
+        "name": "Revenant Captain",
+        "kind": "mob",
+        "zone": "crypt_lower",
+        "pos_x": 8, "pos_y": 8,
+        "description": (
+            "An armoured corpse that remembers how to give orders. The "
+            "longsword on its hip is too well-kept to be dead."
+        ),
+        "hostility": "hostile",
+        "hp_max": 32, "hp_current": 32, "ac": 16,
+        "attack_bonus": 4, "damage_dice": "1d10",
+        "loot_gold": 25,
+        "tameable": False,
+    },
 ]
 
 

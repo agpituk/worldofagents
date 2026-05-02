@@ -206,6 +206,17 @@ class TickEngine:
                 if h.mana_current < h.mana_max:
                     h.mana_current = min(h.mana_max, h.mana_current + mana_regen_per_tick(h))
 
+            # Phase 2 — status effect tick. Apply per-tick payloads
+            # (bleed deals damage, regrowth heals) before they expire,
+            # then prune expired rows so they stop affecting attack/AC
+            # rolls and stop appearing in perception.
+            from app.core.actions import _evict_expired_sandbox_heroes, tick_statuses
+            tick_statuses(db, tick_id)
+            # Phase 8 — sandbox auto-eviction. Heroes who've used up
+            # their training window get bumped into market_square so
+            # the open world claims them.
+            _evict_expired_sandbox_heroes(db, tick_id)
+
             # Faction invasions: every 240 ticks the Embered raise their dead.
             from app.domains.npc.seed import respawn_invasion_mobs
             respawned = respawn_invasion_mobs(db, tick_id)

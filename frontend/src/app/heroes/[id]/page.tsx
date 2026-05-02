@@ -105,7 +105,10 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
         <h1 className={`text-3xl mt-2 ${isDead ? "text-rose-400 line-through" : ""}`}>
           {hero.name}
         </h1>
-        {(hero as any).manifest && null /* title rendered below via memory */}
+        {/* Phase 5 — derived skill identity (GM Fisherman, Expert Smith). */}
+        {hero.top_title && (
+          <div className="mt-1 text-sm text-amber font-semibold">{hero.top_title}</div>
+        )}
         {(() => {
           const title = (hero as any)?.manifest?.memory?.initial?.title; // never set here
           // Pull title from server-side `memory` (live, not manifest). The
@@ -159,12 +162,20 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
           author <span className="text-fg">{hero.author}</span>
         </p>
 
-        <button
-          onClick={copyShareUrl}
-          className="mt-3 text-xs text-amber-dim hover:text-amber border border-border bg-bg-card px-3 py-1"
-        >
-          {copied ? "copied!" : `share /h/${hero.name}`}
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            onClick={copyShareUrl}
+            className="text-xs text-amber-dim hover:text-amber border border-border bg-bg-card px-3 py-1"
+          >
+            {copied ? "copied!" : `share /h/${hero.name}`}
+          </button>
+          <Link
+            href={`/deploy?fork=${hero.id}`}
+            className="text-xs text-emerald-400 hover:text-emerald-300 border border-border bg-bg-card px-3 py-1"
+          >
+            fork this hero
+          </Link>
+        </div>
 
         <div className="mt-6 grid grid-cols-3 gap-2 text-center">
           {Object.entries(hero.build).map(([k, v]) => (
@@ -225,14 +236,44 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
           <div className="mt-6">
             <h2 className="text-xs uppercase tracking-wider text-fg-muted mb-2">skills</h2>
             <ul className="text-sm space-y-1">
-              {Object.entries(hero.skill_levels).map(([name, lvl]) => (
-                <li key={name} className="flex justify-between">
-                  <span className="capitalize">{name}</span>
-                  <span className="text-amber font-mono">
-                    lvl {lvl} <span className="text-fg-muted text-xs">({hero.skills?.[name] ?? 0} xp)</span>
-                  </span>
+              {Object.entries(hero.skill_levels).map(([name, lvl]) => {
+                const rank = hero.skill_titles?.[name];
+                return (
+                  <li key={name} className="flex justify-between">
+                    <span className="capitalize">
+                      {name}
+                      {rank && (
+                        <span className="ml-2 text-[10px] uppercase tracking-wider text-amber/80">
+                          {rank}
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-amber font-mono">
+                      lvl {lvl} <span className="text-fg-muted text-xs">({hero.skills?.[name] ?? 0} xp)</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {/* Phase 5 — public reputation. Only render when at least one
+            counter is non-zero so brand-new heroes don't see a noisy block. */}
+        {hero.reputation && (hero.reputation.kills ?? 0) + (hero.reputation.pvp_kills ?? 0) > 0 && (
+          <div className="mt-6">
+            <h2 className="text-xs uppercase tracking-wider text-fg-muted mb-2">reputation</h2>
+            <ul className="text-sm space-y-1">
+              <li className="flex justify-between">
+                <span>kills</span>
+                <span className="text-amber font-mono">{hero.reputation.kills ?? 0}</span>
+              </li>
+              {(hero.reputation.pvp_kills ?? 0) > 0 && (
+                <li className="flex justify-between">
+                  <span>pvp kills</span>
+                  <span className="text-rose-400 font-mono">{hero.reputation.pvp_kills}</span>
                 </li>
-              ))}
+              )}
             </ul>
           </div>
         )}

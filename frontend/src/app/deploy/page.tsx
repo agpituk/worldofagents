@@ -7,7 +7,8 @@
 // no clone, no make dev, just paste-and-go.
 
 import Link from "next/link";
-import { useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { api, WORLD_API_URL } from "@/lib/api";
 
 const STARTER_MANIFEST = `manifest_version: 1
@@ -56,11 +57,64 @@ hero:
       - first_kill
 `;
 
-export default function DeployPage() {
+function manifestYamlFromHero(h: any): string {
+  // Build a minimal-but-runnable YAML from a public Hero record. The
+  // public manifest already strips `system` (the prompt). Output is
+  // plain string concatenation so we don't need a yaml lib in the
+  // browser bundle.
+  const m = (h.manifest || {}) as Record<string, any>;
+  const ext = (m.extras || {}) as Record<string, any>;
+  const build = h.build || {};
+  const lines: string[] = [
+    "manifest_version: 1",
+    "hero:",
+    `  name: "${h.name} (fork)"`,
+    `  author: "${h.author || "@you"}"`,
+    `  division: ${h.division}`,
+  ];
+  if (h.bio) {
+    lines.push(`  bio: ${JSON.stringify(h.bio)}`);
+  }
+  lines.push(
+    "  build:",
+    `    str: ${build.str ?? 12}`,
+    `    dex: ${build.dex ?? 12}`,
+    `    con: ${build.con ?? 12}`,
+    `    int: ${build.int ?? 12}`,
+    `    wis: ${build.wis ?? 12}`,
+    `    cha: ${build.cha ?? 12}`,
+  );
+  // Pass through extras as JSON-ish YAML using JSON.stringify (valid YAML).
+  for (const [k, v] of Object.entries(ext)) {
+    if (v === undefined || v === null) continue;
+    lines.push(`  ${k}: ${JSON.stringify(v)}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+
+function DeployFormBody() {
+  const params = useSearchParams();
+  const forkId = params.get("fork");
   const [manifest, setManifest] = useState(STARTER_MANIFEST);
+  const [forkSource, setForkSource] = useState<string | null>(null);
   const [managed, setManaged] = useState(true); // default ON — paste-and-go
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Phase 8 — load the source hero's public manifest and prefill the
+  // textarea when /deploy?fork=<id> is opened. Failure is silent so a
+  // stale URL doesn't lock anyone out — they can still type freely.
+  useEffect(() => {
+    if (!forkId) return;
+    let live = true;
+    api.getHero(forkId).then((h: any) => {
+      if (!live) return;
+      setForkSource(h.name);
+      setManifest(manifestYamlFromHero(h));
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [forkId]);
   const [registered, setRegistered] = useState<
     | {
         id: string;
@@ -71,6 +125,25 @@ export default function DeployPage() {
       }
     | null
   >(null);
+
+  // Phase 8 — manifest validator. Stays empty until the user clicks
+  // "validate"; results are issue-level (severity + path + message)
+  // and clear when they edit the manifest so stale lints don't linger.
+  const [validation, setValidation] = useState<{ valid: boolean; issues: any[]; summary: any } | null>(null);
+  const [validating, setValidating] = useState(false);
+
+  async function validate() {
+    setValidating(true);
+    setValidation(null);
+    try {
+      const res = await api.validateManifest(manifest);
+      setValidation(res);
+    } catch (e: any) {
+      setValidation({ valid: false, issues: [{ severity: "error", message: String(e?.message ?? "validate failed") }], summary: {} });
+    } finally {
+      setValidating(false);
+    }
+  }
 
   async function deploy() {
     setError(null);
@@ -191,6 +264,13 @@ export default function DeployPage() {
           start the bot. Build is point-buy (≤100 total, 5–25 per stat).
           Permadeath is on by default — your hero gets one life.
         </p>
+        {forkSource && (
+          <div className="mt-3 border border-emerald-700 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-300">
+            forked from <span className="text-amber">{forkSource}</span> —
+            review and edit before deploying. (The system prompt is private,
+            so it isn't carried across.)
+          </div>
+        )}
       </section>
 
       <div className="flex items-center gap-3 text-xs">
@@ -209,10 +289,49 @@ export default function DeployPage() {
 
       <textarea
         value={manifest}
-        onChange={(e) => setManifest(e.target.value)}
+        onChange={(e) => { setManifest(e.target.value); setValidation(null); }}
         spellCheck={false}
         className="w-full h-96 bg-bg-card border border-border px-3 py-2 font-mono text-xs resize-y"
       />
+
+      <div className="flex items-center gap-3 text-xs">
+        <button
+          onClick={validate}
+          disabled={validating || manifest.trim().length === 0}
+          className="border border-border bg-bg-card px-3 py-1 text-fg-muted hover:text-amber-dim hover:border-amber-dim disabled:opacity-50"
+        >
+          {validating ? "validating…" : "validate manifest"}
+        </button>
+        {validation && (
+          <span className={validation.valid ? "text-emerald-400" : "text-rose-300"}>
+            {validation.valid
+              ? `✓ valid · ${validation.summary.spells_declared ?? 0} spells, ${validation.summary.reflexes_declared ?? 0} reflexes`
+              : `${validation.issues.length} issue${validation.issues.length === 1 ? "" : "s"}`}
+          </span>
+        )}
+      </div>
+
+      {validation && validation.issues.length > 0 && (
+        <ul className="border border-border bg-bg-card divide-y divide-border text-xs">
+          {validation.issues.map((iss: any, i: number) => (
+            <li key={i} className="px-3 py-2">
+              <span
+                className={
+                  iss.severity === "error"
+                    ? "text-rose-300 mr-2"
+                    : iss.severity === "warning"
+                    ? "text-amber mr-2"
+                    : "text-fg-muted mr-2"
+                }
+              >
+                {iss.severity}
+              </span>
+              {iss.path && <code className="text-fg-muted mr-2">{iss.path}</code>}
+              <span>{iss.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <label className="flex items-start gap-3 border border-border bg-bg-card px-4 py-3 cursor-pointer hover:border-amber-dim">
         <input
@@ -253,3 +372,12 @@ export default function DeployPage() {
     </div>
   );
 }
+
+export default function DeployPage() {
+  return (
+    <Suspense fallback={<div className='text-fg-muted'>loading…</div>}>
+      <DeployFormBody />
+    </Suspense>
+  );
+}
+

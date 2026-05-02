@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { api, CurrentEvents, Discovery, Hero, Highlight, Longevity, Zone } from "@/lib/api";
+import { api, CurrentEvents, Discovery, Hero, Highlight, Longevity, SkillLeaderboards, Zone } from "@/lib/api";
 import { formatLifespan } from "@/lib/format";
 
 const KIND_COLOR: Record<Zone["kind"], string> = {
@@ -19,19 +19,21 @@ export default function WorldPage() {
   const [events, setEvents] = useState<CurrentEvents | null>(null);
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [discoveries, setDiscoveries] = useState<Discovery[]>([]);
+  const [skillBoards, setSkillBoards] = useState<SkillLeaderboards | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     async function load() {
       try {
-        const [zs, hs, lg, ev, hl, ds] = await Promise.all([
+        const [zs, hs, lg, ev, hl, ds, sb] = await Promise.all([
           api.listZones(),
           api.listHeroes(),
           api.longevity(8),
           api.currentEvents(),
           api.listHighlights(8),
           api.listDiscoveries(),
+          api.skillLeaderboards(3),
         ]);
         if (!live) return;
         setZones(zs);
@@ -40,6 +42,7 @@ export default function WorldPage() {
         setEvents(ev);
         setHighlights(hl);
         setDiscoveries(ds);
+        setSkillBoards(sb);
       } catch (e: any) {
         if (live) setError(e?.message ?? "fetch failed");
       }
@@ -82,6 +85,12 @@ export default function WorldPage() {
           </Link>
           <Link href="/bounties" className="text-rose-300 hover:text-rose-200 underline">
             bounty board →
+          </Link>
+          <Link href="/contracts" className="text-emerald-400 hover:text-emerald-300 underline">
+            contracts →
+          </Link>
+          <Link href="/glossary" className="text-fg-muted hover:text-amber-dim underline">
+            glossary
           </Link>
         </div>
       </section>
@@ -194,6 +203,55 @@ export default function WorldPage() {
           </div>
         </section>
       )}
+
+      {/* Skill champions — top per-skill GMs/Experts/Skilled. The board
+          is keyed by skill name; we only render skills that have at least
+          one hero on them so a fresh world stays clean. */}
+      {skillBoards && (() => {
+        const populated = Object.entries(skillBoards.boards).filter(
+          ([, rows]) => rows.length > 0,
+        );
+        if (populated.length === 0) return null;
+        return (
+          <section>
+            <h2 className="text-sm uppercase tracking-wider text-fg-muted mb-3">
+              skill champions · top {skillBoards.top} by xp
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {populated.map(([skillName, rows]) => (
+                <div key={skillName} className="border border-border bg-bg-card">
+                  <div className="px-3 py-2 border-b border-border text-xs uppercase tracking-wider text-amber">
+                    {skillName.replace(/_/g, " ")}
+                  </div>
+                  <ol className="divide-y divide-border">
+                    {rows.map((r, i) => (
+                      <li key={r.id}>
+                        <Link
+                          href={`/heroes/${r.id}`}
+                          className="flex items-center justify-between px-3 py-1.5 text-xs hover:bg-amber-dim/5"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-fg-muted font-mono w-4 text-right">{i + 1}.</span>
+                            <span className={`truncate ${r.status === "dead" ? "text-rose-300 line-through" : ""}`}>
+                              {r.name}
+                            </span>
+                            {r.rank && (
+                              <span className="text-[9px] uppercase tracking-wider text-amber/70">
+                                {r.rank}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-amber font-mono">lvl {r.level}</span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })()}
 
       {longevity && (longevity.alive.length > 0 || longevity.hall_of_fame.length > 0) && (
         <section>

@@ -119,10 +119,16 @@ def run_mob_phase(db: Session) -> list[dict[str, Any]]:
         if crit:
             damage *= 2
         target.hp = max(0, target.hp - damage)
-        died = target.hp <= 0
-        if died:
-            target.status = "dead"
-            target.died_at_tick = _current_tick(db)
+        fatal = target.hp <= 0
+        died = False
+        if fatal:
+            # Phase 8 — sandbox protection. Route the lethal blow through
+            # the shared resolver; if the hero is in the protection
+            # window or the sandbox zone, they'll be respawned rather
+            # than permadied. `died=False` then keeps the spectator
+            # stream from announcing a death that didn't stick.
+            from app.core.actions import _resolve_hero_death_or_respawn
+            died = _resolve_hero_death_or_respawn(db, target, current_tick=_current_tick(db))
 
         payloads.append({
             "mob": mob.slug, "target_hero_id": str(target.id), "target_name": target.name,

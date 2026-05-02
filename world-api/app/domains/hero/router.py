@@ -97,6 +97,51 @@ def longevity(db: Annotated[Session, Depends(get_db)], limit: int = 20):
     }
 
 
+@router.get("/leaderboard/skills")
+def skill_leaderboards(
+    db: Annotated[Session, Depends(get_db)], top: int = 10
+):
+    """Per-skill top-N heroes by XP, plus their rendered title rank.
+
+    Phase 5 of the build-diversity roadmap: identity surface for the
+    "GM Fisherman" / "Expert Smith" world. Computes once across all
+    skills the world knows about — both currently-grindable
+    (mining / smithing / fishing / …) and combat (melee / magic /
+    stealth) — so a hero who never swings a sword still has a board to
+    appear on.
+
+    Heroes who don't have any XP in a skill are omitted from that
+    skill's board. Returns at most `top` rows per skill.
+    """
+    from app.core.actions import _SKILL_TITLE_NOUN, _skill_rank, top_title_for
+
+    rows = list(db.scalars(sa_select(Hero)))
+    boards: dict[str, list[dict]] = {}
+    for skill_name in _SKILL_TITLE_NOUN:
+        scored: list[tuple[int, Hero]] = []
+        for h in rows:
+            xp = int((h.skills or {}).get(skill_name, 0) or 0)
+            if xp <= 0:
+                continue
+            scored.append((xp, h))
+        scored.sort(key=lambda p: -p[0])
+        boards[skill_name] = [
+            {
+                "id": str(h.id),
+                "name": h.name,
+                "author": h.author,
+                "division": h.division,
+                "status": h.status,
+                "xp": xp,
+                "level": min(100, xp // 10),
+                "rank": _skill_rank(min(100, xp // 10)),
+                "top_title": top_title_for(h.skills),
+            }
+            for xp, h in scored[:top]
+        ]
+    return {"top": top, "boards": boards}
+
+
 @router.get("/by-name/{name}", response_model=HeroOut)
 def get_hero_by_name(name: str, db: Annotated[Session, Depends(get_db)]):
     """Resolve a hero by their unique name. Used by share-friendly URLs."""
@@ -138,6 +183,20 @@ def get_memory_trace(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]
         "retriever_name": get_retriever().name,
         "journal_relevant": _journal_relevant(db, hero, n=10),
     }
+
+
+@router.get("/{hero_id}/perception")
+def get_perception(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]):
+    """Phase 8 — dry-run perception. Returns the JSON payload the LLM
+    would see this tick for this hero. Useful for "why didn't my reflex
+    fire?" debugging — the inputs the agent sees are right there.
+
+    No state is mutated; this is read-only and safe to poll."""
+    from app.core.actions import perception_for
+    hero = HeroService.get_by_id(db, hero_id)
+    if hero is None:
+        raise HTTPException(404, "hero not found")
+    return perception_for(db, hero)
 
 
 @router.get("/{hero_id}/quests")

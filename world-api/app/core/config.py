@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     world_tick_seconds: float = 6.0
     gateway_base_url: str = "http://llm-gateway:8001"
 
+    # Phase 6 — total skill XP a hero can accumulate across all skills
+    # combined. UO's 700-point cap was the single biggest driver of build
+    # diversity in that game; this is the same idea translated to XP
+    # (1000 XP per skill = level 100). Default `0` = uncapped (the
+    # legacy behaviour); a hero opts in via `manifest.build.skill_cap`.
+    # Heroes still gain XP up to the cap; over-cap grants are silently
+    # dropped at the `_grant_xp` boundary, so the verb still resolves
+    # — just no skill bump. Reflex DSL gets `skill_points_remaining`.
+    skill_cap_total_default: int = 0
+
     @property
     def database_url(self) -> str:
         return (

@@ -67,6 +67,21 @@ class HeroService:
         # Stamp birth tick — the lifespan counter starts ticking now.
         from sqlalchemy import func as _func
         born_at = int(db.scalar(select(_func.max(Tick.id))) or 0)
+
+        # Phase 8 — sandbox tutorial. New heroes spawn in `sandbox`
+        # under a 50-tick safety net unless their manifest opts out.
+        # `extras.skip_sandbox: true` skips the tutorial and lands them
+        # at market_square at full risk — for advanced authors who don't
+        # want the protected window.
+        skip_sandbox = bool(manifest.extras.get("skip_sandbox"))
+        sandbox_protection_ticks = int(manifest.extras.get("sandbox_ticks", 50) or 50)
+        if skip_sandbox:
+            spawn_zone = "market_square"
+            protected_until_tick = 0
+        else:
+            spawn_zone = "sandbox"
+            protected_until_tick = born_at + max(0, sandbox_protection_ticks)
+
         hero = Hero(
             id=uuid.uuid4(),
             name=manifest.name,
@@ -74,6 +89,7 @@ class HeroService:
             division=manifest.division,
             bio=manifest.bio,
             born_at_tick=born_at,
+            protected_until_tick=protected_until_tick,
             str_=manifest.build.str_,
             dex=manifest.build.dex,
             con=manifest.build.con,
@@ -82,9 +98,9 @@ class HeroService:
             cha=manifest.build.cha,
             hp=hp,
             status="alive",
-            zone="market_square",
-            pos_x=5,
-            pos_y=5,
+            zone=spawn_zone,
+            pos_x=4,
+            pos_y=4,
             mana_max=mana_max,
             mana_current=mana_max,
             known_spells=[],

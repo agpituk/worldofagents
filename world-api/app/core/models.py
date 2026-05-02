@@ -111,6 +111,14 @@ class Hero(Base, TimestampMixin):
     born_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     died_at_tick: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    # Phase 8 — sandbox protection. While `current_tick <
+    # protected_until_tick`, the hero is in a tutorial-grade safety net:
+    # any fatal blow respawns them at full HP instead of stamping
+    # died_at_tick. Default 0 means no protection (the legacy behaviour
+    # for every existing hero). New heroes get `born_at_tick + 50`
+    # unless their manifest opts out via `extras.skip_sandbox: true`.
+    protected_until_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     # Managed mode: when true, the world-api runs the bot loop on the hero's
     # behalf — reflexes, LLM calls, action submissions all happen server-side.
     # When false (legacy), the player runs the bot loop locally via the SDK.
@@ -306,6 +314,47 @@ class Spell(Base):
     heal_dice: Mapped[str] = mapped_column(String(16), nullable=False, default="0d0")
     skill_required: Mapped[str] = mapped_column(String(32), nullable=False, default="magic")
     skill_min: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Phase 2: effect kind drives which handler runs at cast time. The
+    # default `damage_or_heal` keeps the v0.6 spells (firebolt /
+    # frost_lance / mend) on their existing path — pick `apply_status`,
+    # `dispel`, `move_self`, `move_target`, `summon_npc`, or `reveal` to
+    # exercise the new handlers. `payload` is kind-specific JSON
+    # (status slug + duration_ticks for apply_status, mob slug for
+    # summon_npc, etc.).
+    effect_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="damage_or_heal"
+    )
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class Status(Base):
+    """An active status effect on a hero — the durable side-channel that
+    spells use to modify combat without re-targeting on every tick. A
+    Bless raises to-hit; a Stoneskin raises AC; a Slow drops action
+    priority; a Bleed ticks damage. The world tick decrements
+    `expires_at_tick` and removes rows that hit zero.
+
+    `slug` is the effect's identity (e.g. `bless`, `stoneskin`, `slow`,
+    `blind`, `bleed`, `regrowth`). `payload` carries kind-specific
+    numeric tunables (bonus magnitude, damage dice, source caster id)
+    so the same row format covers all status types.
+
+    Multiple stacks of the same slug on the same hero are allowed — the
+    apply path can choose to refresh the longest-running one or stack
+    them. We keep that policy in the spell handler, not the schema.
+    """
+
+    __tablename__ = "statuses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hero_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    slug: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    applied_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    source_hero_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
 
 
 class Item(Base):
@@ -334,6 +383,14 @@ class Item(Base):
     # (and with zone/pos for ground items).
     stash_owner_hero_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
 
+    # Crafter marks (Phase 5). Stamped at craft time on the new Item row.
+    # `crafted_by_name` is the denormalised hero name at that moment so
+    # item tooltips can show "Iron Sword crafted by Tova" without a join,
+    # and so the mark survives even after the crafter is dead and gone.
+    # NULL for seeded items, mob drops, and pre-Phase-5 inventory.
+    crafted_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    crafted_by_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
 
 class Tournament(Base):
     """A scheduled or running competition. Heroes register; PvP kills in
@@ -359,25 +416,50 @@ class Tournament(Base):
     prize_faction_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
-class Bounty(Base):
-    """A public hit on a hero. Anyone (a hero now, eventually a spectator)
-    can post one by paying gold up front; the next hero who lands a fatal
-    blow on the target collects the prize. Bounty board on the home page
-    is the social spine that turns PvP from a mechanic into drama."""
+class Contract(Base):
+    """The labor market that binds non-combat specialists to fighters.
+    Phase 4 of the build-diversity roadmap: a unified table for every
+    "I'll pay you to do X" arrangement in the world. The bounty board is
+    one filtered view (`kind='bounty'`); the rest are the kinds that let
+    a fisher hire an escort, an alchemist post a delivery, a vendor
+    fund their own zone defense.
 
-    __tablename__ = "bounties"
+    Status flow:
+      • open      — posted, gold escrowed.
+      • claimed   — a hero has taken the job (defense / delivery / escort
+                    / caravan). Skipped for kinds that pay any-finder
+                    (bounty / assassination) — those go open → fulfilled.
+      • fulfilled — terms met, payout sent.
+      • expired   — timed out or cancelled. Gold refunded to poster.
+
+    `target_hero_id` is set for hero-targeting contracts (bounty,
+    assassination); `target_ref` is the free-form string for kinds that
+    point at NPCs / items / zones (delivery dest_npc, etc.). Both
+    nullable — defense, escort have no single target.
+
+    `terms` is a JSON blob whose shape is kind-specific (see
+    `domains/contract/router.py` for the per-kind contract). Keeping it
+    permissive here means new kinds can land without schema churn.
+    """
+
+    __tablename__ = "contracts"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    target_hero_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
-    target_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     poster_hero_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     poster_name: Mapped[str] = mapped_column(String(120), nullable=False, default="anonymous")
+    target_hero_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    target_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reward_gold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", index=True)
+    zone_scope: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     reason: Mapped[str] = mapped_column(String(280), nullable=False, default="")
-    gold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")  # open | claimed | expired
+    terms: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at_tick: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    claimed_by_hero_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    expires_at_tick: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    claimed_by_hero_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     claimed_at_tick: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fulfilled_at_tick: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class TournamentEntry(Base):
