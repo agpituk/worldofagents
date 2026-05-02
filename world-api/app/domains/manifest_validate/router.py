@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -251,6 +251,43 @@ async def validate_manifest(
 # ---------------------------------------------------------------------------
 # /admin/verb-catalog — read-only verb spec for the block editor
 # ---------------------------------------------------------------------------
+
+
+@admin_router.get("/hero/{hero_id}/tool-spec")
+def hero_tool_spec(
+    db: Annotated[Session, Depends(get_db)],
+    hero_id: str,
+):
+    """Return the OpenAI-format tool list this hero would receive from
+    the LLM gateway. Lets you verify a docstring override applied
+    without spinning up the bot loop. Read-only."""
+    import uuid as _uuid
+    from app.core.models import Hero
+    try:
+        hid = _uuid.UUID(hero_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid hero_id")
+    hero = db.get(Hero, hid)
+    if hero is None:
+        raise HTTPException(status_code=404, detail="hero not found")
+
+    from arena_bot.actions import DEFAULT_TOOLS  # type: ignore
+    from arena_bot.tool_dispatch import HeroToolset  # type: ignore
+    from arena_bot.tools import build_tool_specs_for_hero  # type: ignore
+
+    toolset = HeroToolset.from_manifest(hero.manifest or {})
+    manifest_tools = (
+        list(toolset.composites.values())
+        + list(toolset.overrides.values())
+    )
+    specs = build_tool_specs_for_hero(list(DEFAULT_TOOLS), manifest_tools)
+    return {
+        "hero_id": hero_id,
+        "hero_name": hero.name,
+        "specs": specs,
+        "composite_count": len(toolset.composites),
+        "override_count": len(toolset.overrides),
+    }
 
 
 @admin_router.get("/verb-catalog")
