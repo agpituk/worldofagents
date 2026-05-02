@@ -39,6 +39,7 @@ class ManagedHeroTask:
             HeroDecisionState, parse_abilities, parse_persona,
         )
         from arena_bot.reflexes import ReflexEngine
+        from arena_bot.tool_dispatch import HeroToolset
 
         inner = manifest.get("hero") if isinstance(manifest.get("hero"), dict) else manifest
         self._inner = inner or {}
@@ -51,6 +52,7 @@ class ManagedHeroTask:
 
         self._reflexes = ReflexEngine(self._inner.get("reflexes") or [])
         self._abilities = parse_abilities(manifest)
+        self._toolset = HeroToolset.from_manifest(manifest)
         self._state = HeroDecisionState()
 
     # ------------------------------------------------------------------
@@ -149,9 +151,16 @@ class ManagedHeroTask:
     async def _call_llm(self, perception: "Perception") -> dict[str, Any]:  # type: ignore[name-defined]
         from arena_bot.actions import DEFAULT_TOOLS
         from arena_bot.client import build_tool_action_prompt, parse_json_action
-        from arena_bot.tools import build_tool_index, build_tool_specs
+        from arena_bot.tool_dispatch import expand_tool_call
+        from arena_bot.tools import (
+            build_tool_index, build_tool_specs_for_hero,
+        )
 
-        specs = build_tool_specs(list(DEFAULT_TOOLS))
+        manifest_tools = (
+            list(self._toolset.composites.values())
+            + list(self._toolset.overrides.values())
+        )
+        specs = build_tool_specs_for_hero(list(DEFAULT_TOOLS), manifest_tools)
         index = build_tool_index(list(DEFAULT_TOOLS))
         system, user = build_tool_action_prompt(
             name=self.name, bio=self._bio, goal=self._goal,
@@ -183,10 +192,27 @@ class ManagedHeroTask:
         tool_calls = body.get("tool_calls") or []
         if tool_calls:
             first = tool_calls[0]
-            fn = index.get(first.get("name", ""))
+            chosen_name = first.get("name", "")
+            chosen_args = first.get("arguments") or {}
+
+            # Composite tool — expand and queue the tail through the same
+            # composite_queue mechanism abilities use.
+            if self._toolset.is_composite(chosen_name):
+                result = expand_tool_call(
+                    chosen_name, chosen_args, toolset=self._toolset,
+                )
+                if not result.actions:
+                    return {"do": "wait"}
+                head, *tail = result.actions
+                if tail:
+                    self._state.composite_queue = list(tail)
+                    self._state.composite_name = chosen_name
+                return head
+
+            fn = index.get(chosen_name)
             if fn is not None:
                 try:
-                    return fn(**(first.get("arguments") or {}))
+                    return fn(**chosen_args)
                 except TypeError as exc:
                     log.warning("managed: bad tool args for %s (%s) — wait fallback",
                                 self.name, exc)

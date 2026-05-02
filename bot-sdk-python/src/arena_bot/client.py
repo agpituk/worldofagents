@@ -68,6 +68,11 @@ class Decision:
     messages: list[dict[str, str]] | None = None
     model: str | None = None
     debug: dict[str, Any] | None = None
+    # Phase 2 — when the LLM picks a composite tool, the dispatcher expands
+    # its steps into a list of primitive actions. The first one is `action`;
+    # the rest land here for the runtime to push into the composite queue
+    # (one primitive per tick). None means "single primitive tool call".
+    composite_queue_tail: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -608,16 +613,29 @@ class Hero:
         goal: str = "",
         system_summary: str = "",
         fallback: dict[str, Any] | None = None,
+        toolset: Any = None,
     ) -> Decision:
         """Native tool-calling path. Each callable in `tools` becomes a model
         tool via `build_tool_specs()`. The model picks ONE tool, the SDK
-        dispatches it locally to produce the action dict, then submits."""
+        dispatches it locally to produce the action dict, then submits.
+
+        `toolset` is an optional `arena_bot.tool_dispatch.HeroToolset` —
+        when present, docstring overrides are applied to the spec list and
+        composite tools are appended. If the LLM picks a composite, the
+        dispatcher expands its steps; the first action is returned, the rest
+        ride along on `Decision.composite_queue_tail` for the runtime to
+        queue.
+        """
         from arena_bot.actions import DEFAULT_TOOLS
-        from arena_bot.tools import build_tool_index, build_tool_specs
+        from arena_bot.tools import build_tool_index, build_tool_specs, build_tool_specs_for_hero
 
         fallback = fallback or {"do": "wait"}
         tool_fns = list(tools) if tools else list(DEFAULT_TOOLS)
-        specs = build_tool_specs(tool_fns)
+        if toolset is not None:
+            manifest_tools = list(toolset.composites.values()) + list(toolset.overrides.values())
+            specs = build_tool_specs_for_hero(tool_fns, manifest_tools)
+        else:
+            specs = build_tool_specs(tool_fns)
         index = build_tool_index(tool_fns)
 
         system, user = build_tool_action_prompt(
@@ -654,29 +672,54 @@ class Hero:
                 )
 
         first = tool_calls[0]
-        fn = index.get(first.get("name", ""))
+        chosen_name = first.get("name", "")
+        chosen_args = first.get("arguments") or {}
+
+        # Composite tool — expand via the dispatcher. First primitive is
+        # this tick's action; the rest land in composite_queue_tail.
+        if toolset is not None and toolset.is_composite(chosen_name):
+            from arena_bot.tool_dispatch import expand_tool_call
+
+            result = expand_tool_call(
+                chosen_name, chosen_args, toolset=toolset,
+            )
+            if not result.actions:
+                log.warning("composite '%s' expanded to nothing — falling back",
+                            chosen_name)
+                return Decision(kind="reflex", action=fallback)
+            head, *tail = result.actions
+            log.info("LLM picked composite: %s(%s) → %d actions",
+                     chosen_name, chosen_args, len(result.actions))
+            return Decision(
+                kind="llm", action=head,
+                gateway_token=body["gateway_token"],
+                composite_queue_tail=tail or None,
+                debug={"composite": chosen_name, "expanded": len(result.actions)},
+            )
+
+        fn = index.get(chosen_name)
         if fn is None:
-            log.warning("LLM picked unknown tool %r — falling back", first.get("name"))
+            log.warning("LLM picked unknown tool %r — falling back", chosen_name)
             return Decision(
                 kind="reflex", action=fallback,
                 debug={"parse_error": "unknown_tool",
-                       "raw_output": str(first.get("name", ""))[:500]},
+                       "raw_output": str(chosen_name)[:500]},
             )
 
         try:
-            action = fn(**(first.get("arguments") or {}))
+            action = fn(**chosen_args)
         except TypeError as exc:
             log.warning("tool '%s' rejected args %s (%s) — falling back",
-                        first.get("name"), first.get("arguments"), exc)
+                        chosen_name, chosen_args, exc)
             return Decision(
                 kind="reflex", action=fallback,
                 debug={"parse_error": "bad_tool_args",
-                       "raw_output": json.dumps({"name": first.get("name"),
-                                                 "arguments": first.get("arguments")})[:500]},
+                       "raw_output": json.dumps({"name": chosen_name,
+                                                 "arguments": chosen_args})[:500]},
             )
 
         log.info("LLM picked tool: %s(%s) → %s",
-                 first.get("name"), first.get("arguments"), action)
+                 chosen_name, chosen_args, action)
         return Decision(kind="llm", action=action, gateway_token=body["gateway_token"])
 
     # ----------------------------------------------------------------- internal

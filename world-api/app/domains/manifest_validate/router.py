@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.models import NPC, Recipe, Spell, Zone
 from app.domains.hero.service import HeroService
+from app.domains.manifest_validate.tools_validator import validate_tools
 
 router = APIRouter(prefix="/manifest", tags=["manifest"])
 
@@ -100,6 +101,19 @@ async def validate_manifest(
     extras = parsed.extras or {}
     abilities = extras.get("abilities") or {}
 
+    # Tools — composites + docstring overrides (Phase 2). Phase 3 lifts the
+    # gate on `when:` / `clamp:` / `after:` / `if`-step. The validator is
+    # the single authority on what shapes the runtime will accept.
+    tools_issues, parsed_tools = validate_tools(
+        extras.get("tools"),
+        valid_verbs=VALID_VERBS,
+    )
+    for issue in tools_issues:
+        issues.append(Issue(**issue))
+    composite_tool_names: set[str] = {
+        t.name for t in parsed_tools if getattr(t, "kind", None) == "composite"
+    }
+
     # Spells the manifest declares the hero will know.
     declared_spells = abilities.get("spells") or []
     if isinstance(declared_spells, list):
@@ -131,7 +145,11 @@ async def validate_manifest(
             then = rx.get("then")
             if isinstance(then, dict):
                 verb = then.get("do")
-                if isinstance(verb, str) and verb not in VALID_VERBS:
+                if (
+                    isinstance(verb, str)
+                    and verb not in VALID_VERBS
+                    and verb not in composite_tool_names
+                ):
                     issues.append(Issue(
                         severity="error",
                         message=f"unknown verb '{verb}' in reflex.then.do",
@@ -195,5 +213,6 @@ async def validate_manifest(
             "division": parsed.division,
             "spells_declared": len(declared_spells) if isinstance(declared_spells, list) else 0,
             "reflexes_declared": len(reflexes) if isinstance(reflexes, list) else 0,
+            "tools_declared": len(parsed_tools),
         },
     )

@@ -33,6 +33,7 @@ from arena_bot.hero_runtime import (
     parse_persona,
 )
 from arena_bot.reflexes import ReflexEngine
+from arena_bot.tool_dispatch import HeroToolset
 
 
 log = logging.getLogger("arena_bot.runner")
@@ -67,6 +68,7 @@ class ManifestHero(Hero):
         self._model_id = persona["model_id"]
 
         self._abilities = parse_abilities(manifest)
+        self._toolset = HeroToolset.from_manifest(manifest)
         self._state = HeroDecisionState()
 
     async def decide(self, perception: Perception) -> Decision:
@@ -75,7 +77,14 @@ class ManifestHero(Hero):
                 perception=p, model=self._model_id, bio=self._bio,
                 goal=self._goal, system_summary=self._system_summary,
                 fallback={"do": "wait"},
+                toolset=self._toolset,
             )
+            # If the LLM picked a composite, push its tail into the queue
+            # so the runtime drains one primitive per tick. Reuses the same
+            # mechanism the reflex-side abilities path uses.
+            if d.composite_queue_tail:
+                self._state.composite_queue = list(d.composite_queue_tail)
+                self._state.composite_name = (d.debug or {}).get("composite")
             return d.action
 
         action, debug = await decide_one(
