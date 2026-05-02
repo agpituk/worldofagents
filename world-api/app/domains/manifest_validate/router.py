@@ -208,6 +208,30 @@ async def validate_manifest(
             path="memory.recall_tags",
         ))
 
+    # Surface tool entries as plain dicts so the deploy UI can render
+    # them as cards without re-parsing YAML client-side. Truncated
+    # description fields keep the response small.
+    tools_preview: list[dict[str, Any]] = []
+    for t in parsed_tools:
+        if getattr(t, "kind", None) == "composite":
+            tools_preview.append({
+                "name": t.name,
+                "kind": "composite",
+                "description": (t.description or "").strip()[:200],
+                "step_count": len(getattr(t, "steps", []) or []),
+                "param_count": len(getattr(t, "parameters", []) or []),
+            })
+        else:
+            tools_preview.append({
+                "name": t.name,
+                "kind": "override",
+                "override_verb": getattr(t, "override_verb", t.name),
+                "description": (getattr(t, "description", "") or "").strip()[:200],
+                "has_when": getattr(t, "when_expr", None) is not None,
+                "clamp_param_count": len(getattr(t, "clamp", {}) or {}),
+                "after_step_count": len(getattr(t, "after", []) or []),
+            })
+
     has_errors = any(i.severity == "error" for i in issues)
     return ValidationOut(
         valid=not has_errors,
@@ -219,6 +243,7 @@ async def validate_manifest(
             "spells_declared": len(declared_spells) if isinstance(declared_spells, list) else 0,
             "reflexes_declared": len(reflexes) if isinstance(reflexes, list) else 0,
             "tools_declared": len(parsed_tools),
+            "tools": tools_preview,
         },
     )
 

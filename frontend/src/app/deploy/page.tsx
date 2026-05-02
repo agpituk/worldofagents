@@ -305,7 +305,7 @@ function DeployFormBody() {
         {validation && (
           <span className={validation.valid ? "text-emerald-400" : "text-rose-300"}>
             {validation.valid
-              ? `✓ valid · ${validation.summary.spells_declared ?? 0} spells, ${validation.summary.reflexes_declared ?? 0} reflexes`
+              ? `✓ valid · ${validation.summary.spells_declared ?? 0} spells · ${validation.summary.reflexes_declared ?? 0} reflexes · ${validation.summary.tools_declared ?? 0} tools`
               : `${validation.issues.length} issue${validation.issues.length === 1 ? "" : "s"}`}
           </span>
         )}
@@ -331,6 +331,43 @@ function DeployFormBody() {
             </li>
           ))}
         </ul>
+      )}
+
+      {validation?.valid && Array.isArray(validation.summary?.tools) && validation.summary.tools.length > 0 && (
+        <section>
+          <div className="text-xs uppercase tracking-wider text-fg-muted mb-2">
+            tools preview · {validation.summary.tools.length}
+          </div>
+          <ul className="border border-border divide-y divide-border text-xs">
+            {validation.summary.tools.map((t: any, i: number) => (
+              <li key={i} className="px-3 py-2 flex items-baseline gap-3">
+                <span className={t.kind === "override" ? "italic text-amber-dim" : "font-mono text-amber"}>
+                  {t.name}
+                </span>
+                <span className="text-fg-muted">{t.kind}</span>
+                {t.kind === "composite" && (
+                  <span className="text-fg-muted">
+                    {t.step_count} step{t.step_count === 1 ? "" : "s"}
+                    {t.param_count > 0 && ` · ${t.param_count} param${t.param_count === 1 ? "" : "s"}`}
+                  </span>
+                )}
+                {t.kind === "override" && (
+                  <span className="text-fg-muted">
+                    of <code>{t.override_verb}</code>
+                    {t.has_when && " · when"}
+                    {t.clamp_param_count > 0 && ` · ${t.clamp_param_count} clamp`}
+                    {t.after_step_count > 0 && ` · ${t.after_step_count} after`}
+                  </span>
+                )}
+                {t.description && (
+                  <span className="text-fg-muted ml-auto truncate max-w-[40%]" title={t.description}>
+                    {t.description}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       <label className="flex items-start gap-3 border border-border bg-bg-card px-4 py-3 cursor-pointer hover:border-amber-dim">
