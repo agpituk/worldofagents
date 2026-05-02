@@ -2,9 +2,16 @@
 
 import Link from "next/link";
 import { use, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import yaml from "js-yaml";
 import { api, Hero, JournalEntry, Longevity, MemoryTrace, Quest } from "@/lib/api";
 import { formatLifespan } from "@/lib/format";
 import { useZoneStream } from "@/lib/use-zone-stream";
+import ToolListPanel from "@/components/inspector/ToolListPanel";
+
+// Lazy-load Blockly here too — keeps hero pages light when the user
+// hasn't expanded the blocks panel.
+const HeroBlocksRO = dynamic(() => import("@/components/HeroBlocksRO"), { ssr: false });
 
 export default function HeroPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -460,6 +467,28 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
             </div>
           )}
         </details>
+
+        {/* Read-only block render — shows reflexes/abilities/tools as
+            Blockly blocks, lazy-loaded so the hero page stays light. */}
+        {hero?.manifest && (
+          <details className="mt-6 group">
+            <summary className="text-xs uppercase tracking-wider text-fg-muted cursor-pointer hover:text-amber">
+              blocks (visual)
+            </summary>
+            <div className="mt-3">
+              <HeroBlocksRO
+                yaml={yaml.dump({ hero: hero.manifest })}
+                height={420}
+              />
+            </div>
+          </details>
+        )}
+
+        {/* Inspector — Phase 5. Shows the hero's user-defined tools with
+            stats and a per-tick "why didn't my tool fire?" deep-link. */}
+        <div className="mt-6">
+          <ToolListPanel heroId={id} />
+        </div>
       </aside>
 
       <section className="border-l border-border pl-6 min-h-[60vh]">
@@ -533,6 +562,14 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
                       )}
                       {debug.via === "invoke_llm" && (
                         <span className="text-amber"> · invoke_llm</span>
+                      )}
+                      {debug.via === "invoke_llm" && e.data?.tick_id && (
+                        <Link
+                          href={`/heroes/${id}/ticks/${e.data.tick_id}`}
+                          className="ml-2 text-emerald-400 hover:text-emerald-300 underline decoration-dotted"
+                        >
+                          debug this choice →
+                        </Link>
                       )}
                     </div>
                   )}

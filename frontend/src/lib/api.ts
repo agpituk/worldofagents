@@ -233,6 +233,16 @@ export const api = {
     if (!r.ok) throw new Error(`validate failed: ${r.status}`);
     return r.json() as Promise<{ valid: boolean; issues: any[]; summary: any }>;
   },
+  simulateTick: async (manifestYaml: string) => {
+    const fd = new FormData();
+    fd.append("manifest", new Blob([manifestYaml], { type: "application/x-yaml" }), "manifest.yaml");
+    const r = await fetch(`${WORLD_API_URL}/manifest/simulate-tick`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`simulate failed: ${r.status}`);
+    return r.json() as Promise<SimulateTickResult>;
+  },
   listContracts: (
     status: "open" | "claimed" | "fulfilled" | "expired" | "all" = "open",
     kind?: string,
@@ -245,6 +255,15 @@ export const api = {
   },
   getHeroByName: (name: string) => fetchJson<Hero>(`/heroes/by-name/${encodeURIComponent(name)}`),
   getMemoryTrace: (id: string) => fetchJson<MemoryTrace>(`/heroes/${id}/memory-trace`),
+  // Inspector — Phase 5 of agent-tools rollout.
+  toolsSummary: (heroId: string) =>
+    fetchJson<{ hero_id: string; tools: ToolSummary[] }>(
+      `/api/heroes/${heroId}/tools/summary`,
+    ),
+  toolDetail: (heroId: string, toolName: string) =>
+    fetchJson<ToolDetail>(`/api/heroes/${heroId}/tools/${toolName}`),
+  tickLlmCall: (heroId: string, tick: number) =>
+    fetchJson<TickLlmCall>(`/api/heroes/${heroId}/ticks/${tick}/llm-call`),
   listBounties: (status: "open" | "claimed" | "expired" | "all" = "open") =>
     fetchJson<Bounty[]>(`/bounties?status=${status}`),
   currentEvents: () => fetchJson<CurrentEvents>("/events/current"),
@@ -440,3 +459,58 @@ export type Contract = {
   claimed_at_tick: number | null;
   fulfilled_at_tick: number | null;
 };
+
+
+// Inspector / Showcase types (Phase 5+6 of agent-tools rollout)
+export type ToolSummary = {
+  name: string;
+  kind: "composite" | "override";
+  calls: number;
+  success: number;
+  blocked_by_override: number;
+  clamps_applied: number;
+  budget_exceeded: number;
+  after_chain_failures: number;
+  expression_type_errors: number;
+  last_called_tick: number | null;
+  description: string;
+};
+
+export type ToolTraceEntry = { event: string; payload: Record<string, any> };
+
+export type ToolDetail = {
+  definition: Record<string, any>;
+  recent_calls: Array<{
+    tick: number;
+    args: Record<string, any>;
+    result: "ok" | "blocked" | "budget_exceeded";
+    trace: ToolTraceEntry[];
+  }>;
+  stats: {
+    calls: number;
+    success: number;
+    blocked_by_override: number;
+    clamps_applied: number;
+    budget_exceeded: number;
+  };
+};
+
+export type TickLlmCall = {
+  chosen_tool: string | null;
+  chosen_args: Record<string, any> | null;
+  tools_offered: Array<{ name: string; description: string }>;
+  reasoning_trace: string;
+  tool_mentions: string[];
+};
+
+
+
+export type SimulateTickResult = {
+  chosen_reflex_index: number | null;
+  chosen_action: { do: string; [k: string]: any };
+  when: string | null;
+  tools_visible_to_llm: { name: string; description: string }[];
+  composite_count: number;
+  override_count: number;
+};
+

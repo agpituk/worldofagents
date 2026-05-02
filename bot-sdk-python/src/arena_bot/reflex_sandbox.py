@@ -108,3 +108,118 @@ def wrap_callables(ctx: Mapping[str, Any], counter: CallCounter) -> dict[str, An
     for k, v in ctx.items():
         out[k] = _wrap(v) if callable(v) else v
     return out
+
+
+# ---------------------------------------------------------------------------
+# Override grammar helpers (Phase 3)
+#
+# Reflexes already get hero state + helpers via the wrapper layer; the
+# override grammar in GRAMMAR.md §1.2 adds a small math/utility set
+# (min, max, clamp, floor, ceil, abs, len) and the `requested` /
+# `param(name)` bindings used inside `clamp:` expressions. These run
+# through the same compile_safe + CallCounter machinery — no new
+# evaluator.
+# ---------------------------------------------------------------------------
+
+
+import math
+
+
+def _clamp(x: Any, lo: Any, hi: Any) -> Any:
+    """3-arg clamp; documented in GRAMMAR.md §1.2."""
+    if hi < lo:
+        # User error — just return the low bound rather than swap silently.
+        return lo
+    return max(lo, min(hi, x))
+
+
+OVERRIDE_HELPERS: dict[str, Any] = {
+    "min": min,
+    "max": max,
+    "clamp": _clamp,
+    "floor": math.floor,
+    "ceil": math.ceil,
+    "abs": abs,
+    "len": len,
+}
+
+
+class _AttrDict:
+    """Wraps a dict so `args.x` works in expressions. The whitelist
+    forbids attribute writes, so this is read-only by construction."""
+
+    __slots__ = ("_d",)
+
+    def __init__(self, d: dict[str, Any]) -> None:
+        self._d = d
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._d[name]
+        except KeyError as e:
+            raise AttributeError(name) from e
+
+    def __getitem__(self, key: str) -> Any:
+        return self._d[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._d
+
+
+class ExpressionTypeError(TypeError):
+    """Raised when an override expression returns a value of the wrong type
+    (e.g., `when:` returned a non-bool). The dispatcher catches this and
+    emits `tool.expression.type_error` so the inspector can render it."""
+
+
+def sandbox_eval(
+    expr: str,
+    *,
+    namespace: Mapping[str, Any],
+    args: Mapping[str, Any] | None = None,
+    requested: Any = None,
+    param_lookup: Callable[[str], Any] | None = None,
+    call_limit: int = 200,
+) -> Any:
+    """Compile + evaluate an override expression.
+
+    Returns the raw value the expression produced. Callers that need a
+    bool/numeric/etc. should use the higher-level helpers below or do
+    their own coercion.
+
+    The namespace gets:
+      • Everything from `namespace` (hero state scalars + helper fns).
+      • `OVERRIDE_HELPERS` (min/max/clamp/floor/ceil/abs/len).
+      • `args.<name>` access via _AttrDict (when `args` provided).
+      • `requested` and `param(name)` (when provided — `clamp` only).
+    """
+    code = compile_safe(expr)
+    counter = CallCounter(call_limit)
+    ns: dict[str, Any] = {}
+    ns.update(OVERRIDE_HELPERS)
+    ns.update(namespace)
+    if args is not None:
+        ns["args"] = _AttrDict(dict(args))
+    if requested is not None:
+        ns["requested"] = requested
+    if param_lookup is not None:
+        ns["param"] = param_lookup
+    wrapped = wrap_callables(ns, counter)
+    return eval(code, {"__builtins__": {}}, wrapped)
+
+
+def sandbox_eval_bool(
+    expr: str,
+    *,
+    namespace: Mapping[str, Any],
+    args: Mapping[str, Any] | None = None,
+) -> bool:
+    """Evaluate a `when:` or `if:` condition. Non-bool result raises
+    ExpressionTypeError; the dispatcher converts that into a structured
+    trace event and treats the condition as false (gating the call)."""
+    value = sandbox_eval(expr, namespace=namespace, args=args)
+    if not isinstance(value, bool):
+        raise ExpressionTypeError(
+            f"expression {expr!r} returned {type(value).__name__}, expected bool"
+        )
+    return value

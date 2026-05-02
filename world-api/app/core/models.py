@@ -524,3 +524,49 @@ class Event(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+
+# ---------------------------------------------------------------------------
+# Agent-tools showcase (Phase 6)
+# ---------------------------------------------------------------------------
+
+
+class ToolDefinition(Base):
+    """Content-addressed tool registry. tool_id is sha256 of canonical YAML."""
+
+    __tablename__ = "tool_definitions"
+
+    tool_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    canonical_yaml: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    parent_tool_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    first_seen_hero: Mapped[str] = mapped_column(String(120), nullable=False)
+
+
+class HeroTool(Base):
+    """Which heroes currently use which tool_id. Composite primary key."""
+
+    __tablename__ = "hero_tools"
+
+    hero_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tool_id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    added_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ToolCopy(Base):
+    """One row per Copy-this-tool click. Drives the most-copied leaderboard."""
+
+    __tablename__ = "tool_copies"
+
+    copy_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_tool_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    copied_by_hero: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    copied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+

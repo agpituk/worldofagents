@@ -16,6 +16,7 @@ dev = ["pytest>=8.0", "ruff>=0.3"]
 
 [project.scripts]
 arena = "arena_bot.runner:main"
+arena-bot = "arena_bot.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -7,9 +7,20 @@
 // no clone, no make dev, just paste-and-go.
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api, WORLD_API_URL } from "@/lib/api";
+
+// Blockly is heavy (~280KB gzipped) — lazy-load only on /deploy.
+const BlockEditor = dynamic(() => import("@/components/BlockEditor"), {
+  ssr: false,
+  loading: () => (
+    <div className="border border-border bg-bg-card p-6 text-xs text-fg-muted">
+      loading block editor...
+    </div>
+  ),
+});
 
 const STARTER_MANIFEST = `manifest_version: 1
 hero:
@@ -287,11 +298,13 @@ function DeployFormBody() {
         </button>
       </div>
 
-      <textarea
+      <BlockEditor
         value={manifest}
-        onChange={(e) => { setManifest(e.target.value); setValidation(null); }}
-        spellCheck={false}
-        className="w-full h-96 bg-bg-card border border-border px-3 py-2 font-mono text-xs resize-y"
+        onChange={(next) => {
+          setManifest(next);
+          setValidation(null);
+        }}
+        validationIssues={validation?.issues}
       />
 
       <div className="flex items-center gap-3 text-xs">
@@ -305,7 +318,7 @@ function DeployFormBody() {
         {validation && (
           <span className={validation.valid ? "text-emerald-400" : "text-rose-300"}>
             {validation.valid
-              ? `✓ valid · ${validation.summary.spells_declared ?? 0} spells, ${validation.summary.reflexes_declared ?? 0} reflexes`
+              ? `✓ valid · ${validation.summary.spells_declared ?? 0} spells · ${validation.summary.reflexes_declared ?? 0} reflexes · ${validation.summary.tools_declared ?? 0} tools`
               : `${validation.issues.length} issue${validation.issues.length === 1 ? "" : "s"}`}
           </span>
         )}
@@ -331,6 +344,47 @@ function DeployFormBody() {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* First-tick simulation panel — runs reflex eval + tool spec
+          assembly server-side against a synthetic perception. */}
+      <SimulationPanel manifest={manifest} />
+
+      {validation?.valid && Array.isArray(validation.summary?.tools) && validation.summary.tools.length > 0 && (
+        <section>
+          <div className="text-xs uppercase tracking-wider text-fg-muted mb-2">
+            tools preview · {validation.summary.tools.length}
+          </div>
+          <ul className="border border-border divide-y divide-border text-xs">
+            {validation.summary.tools.map((t: any, i: number) => (
+              <li key={i} className="px-3 py-2 flex items-baseline gap-3">
+                <span className={t.kind === "override" ? "italic text-amber-dim" : "font-mono text-amber"}>
+                  {t.name}
+                </span>
+                <span className="text-fg-muted">{t.kind}</span>
+                {t.kind === "composite" && (
+                  <span className="text-fg-muted">
+                    {t.step_count} step{t.step_count === 1 ? "" : "s"}
+                    {t.param_count > 0 && ` · ${t.param_count} param${t.param_count === 1 ? "" : "s"}`}
+                  </span>
+                )}
+                {t.kind === "override" && (
+                  <span className="text-fg-muted">
+                    of <code>{t.override_verb}</code>
+                    {t.has_when && " · when"}
+                    {t.clamp_param_count > 0 && ` · ${t.clamp_param_count} clamp`}
+                    {t.after_step_count > 0 && ` · ${t.after_step_count} after`}
+                  </span>
+                )}
+                {t.description && (
+                  <span className="text-fg-muted ml-auto truncate max-w-[40%]" title={t.description}>
+                    {t.description}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       <label className="flex items-start gap-3 border border-border bg-bg-card px-4 py-3 cursor-pointer hover:border-amber-dim">
@@ -378,6 +432,79 @@ export default function DeployPage() {
     <Suspense fallback={<div className='text-fg-muted'>loading…</div>}>
       <DeployFormBody />
     </Suspense>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// First-tick simulation panel — debounced server-side dry-run.
+// ---------------------------------------------------------------------------
+
+import type { SimulateTickResult } from "@/lib/api";
+
+function SimulationPanel({ manifest }: { manifest: string }) {
+  const [data, setData] = useState<SimulateTickResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    if (manifest.trim().length === 0) {
+      setData(null);
+      return;
+    }
+    setPending(true);
+    const id = setTimeout(async () => {
+      try {
+        const r = await api.simulateTick(manifest);
+        setData(r);
+        setError(null);
+      } catch (e: any) {
+        setError(e?.message ?? "simulate failed");
+      } finally {
+        setPending(false);
+      }
+    }, 600);
+    return () => clearTimeout(id);
+  }, [manifest]);
+
+  return (
+    <section className="border border-border bg-bg-card p-3 text-xs">
+      <div className="uppercase tracking-wider text-fg-muted mb-2">
+        first-tick simulation {pending && <span className="text-amber-dim">(refreshing…)</span>}
+      </div>
+      {error && <p className="text-rose-400">{error}</p>}
+      {!error && data && (
+        <div className="space-y-1">
+          <p>
+            <span className="text-fg-muted">would do:</span>{" "}
+            <code className="text-amber">
+              {data.chosen_action.do}
+              {Object.keys(data.chosen_action).filter((k) => k !== "do" && !k.startsWith("_")).length > 0
+                ? `(${Object.entries(data.chosen_action)
+                    .filter(([k]) => k !== "do" && !k.startsWith("_"))
+                    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                    .join(", ")})`
+                : "()"}
+            </code>
+          </p>
+          {data.when && (
+            <p>
+              <span className="text-fg-muted">via reflex #{data.chosen_reflex_index}:</span>{" "}
+              <code className="text-fg-muted">when {data.when}</code>
+            </p>
+          )}
+          {data.chosen_reflex_index === null && (
+            <p className="text-fg-muted italic">
+              no reflex matched — would emit `wait` (LLM only fires on
+              explicit invoke_llm).
+            </p>
+          )}
+          <p className="text-fg-muted mt-2">
+            LLM tool list: {data.tools_visible_to_llm.length} tools (
+            {data.composite_count} composites, {data.override_count} overrides).
+          </p>
+        </div>
+      )}
+    </section>
   );
 }
 
