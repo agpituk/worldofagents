@@ -91,17 +91,19 @@ export function manifestToWorkspace(parsed: ParsedManifest): WorkspaceJson {
   const STEP_X = 380;
   const STEP_Y = 200;
 
-  for (const rx of parsed.reflexes) {
+  parsed.reflexes.forEach((rx, i) => {
     const block = reflexToBlock(rx);
+    block.id = `reflex_${i}`;
     block.x = nextX;
     block.y = nextY;
     blocks.push(block);
     nextY += STEP_Y;
-  }
+  });
   // After reflexes column, start abilities below in the same column.
   nextY += 40;
   for (const [name, spec] of Object.entries(parsed.abilities)) {
     const block = abilityToBlock(name, spec.steps);
+    block.id = `ability_${name}`;
     block.x = nextX;
     block.y = nextY;
     blocks.push(block);
@@ -110,15 +112,19 @@ export function manifestToWorkspace(parsed: ParsedManifest): WorkspaceJson {
   // Tools in a second column.
   nextX += STEP_X;
   nextY = 20;
-  for (const tool of parsed.tools) {
+  parsed.tools.forEach((tool, i) => {
     const block = ("override" in tool && tool.override !== undefined)
       ? overrideToBlock(tool as ManifestOverride)
       : compositeToBlock(tool as ManifestComposite);
+    // Stable id matches the YAML path the validator emits, so a server
+    // error like "tools[2].clamp.distance" can be mapped back to the
+    // tool block at id="tools_2".
+    block.id = `tools_${i}`;
     block.x = nextX;
     block.y = nextY;
     blocks.push(block);
     nextY += STEP_Y;
-  }
+  });
 
   return {
     blocks: { languageVersion: 0, blocks },

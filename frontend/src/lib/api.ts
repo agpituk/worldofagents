@@ -233,6 +233,16 @@ export const api = {
     if (!r.ok) throw new Error(`validate failed: ${r.status}`);
     return r.json() as Promise<{ valid: boolean; issues: any[]; summary: any }>;
   },
+  simulateTick: async (manifestYaml: string) => {
+    const fd = new FormData();
+    fd.append("manifest", new Blob([manifestYaml], { type: "application/x-yaml" }), "manifest.yaml");
+    const r = await fetch(`${WORLD_API_URL}/manifest/simulate-tick`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`simulate failed: ${r.status}`);
+    return r.json() as Promise<SimulateTickResult>;
+  },
   listContracts: (
     status: "open" | "claimed" | "fulfilled" | "expired" | "all" = "open",
     kind?: string,
@@ -491,5 +501,16 @@ export type TickLlmCall = {
   tools_offered: Array<{ name: string; description: string }>;
   reasoning_trace: string;
   tool_mentions: string[];
+};
+
+
+
+export type SimulateTickResult = {
+  chosen_reflex_index: number | null;
+  chosen_action: { do: string; [k: string]: any };
+  when: string | null;
+  tools_visible_to_llm: { name: string; description: string }[];
+  composite_count: number;
+  override_count: number;
 };
 

@@ -1,6 +1,7 @@
 // Composite + override tool containers, plus param_def.
 
 import * as Blockly from "blockly/core";
+import { VERB_SPECS } from "../verbSpec";
 
 export function registerToolBlocks(): void {
   // tool_composite — Shape B in GRAMMAR.md §0.
@@ -22,14 +23,39 @@ export function registerToolBlocks(): void {
     },
   };
 
-  // tool_override — Shape A in GRAMMAR.md §0. The verb being overridden
-  // is a free-text field for v1; a future improvement hooks into the
-  // verb spec to render a dropdown.
+  // tool_override — Shape A in GRAMMAR.md §0. Verb is text input (so
+  // unknown verbs round-trip), but the tooltip hints at the clampable
+  // params for whatever verb is currently set, refreshed on field change.
   Blockly.Blocks["tool_override"] = {
     init(this: Blockly.Block) {
+      const block = this;
+      const tipFor = (verb: string): string => {
+        const spec = VERB_SPECS.find((v) => v.verb === verb);
+        if (!spec) {
+          return (
+            `Override an existing primitive verb. ` +
+            `Verb "${verb}" not in catalog — server validator will check.`
+          );
+        }
+        if (spec.clampable.length === 0) {
+          return (
+            `Override ${spec.verb}. ` +
+            `No clampable params; only description / when / after are useful.`
+          );
+        }
+        return (
+          `Override ${spec.verb}. Clampable params: ${spec.clampable.join(", ")}. ` +
+          `Add clamp_param blocks under "clamp".`
+        );
+      };
+      const verbField = new Blockly.FieldTextInput("verb", function (newValue) {
+        // Refresh tooltip whenever the verb changes.
+        block.setTooltip(tipFor(String(newValue)));
+        return newValue;
+      });
       this.appendDummyInput()
         .appendField("override")
-        .appendField(new Blockly.FieldTextInput("verb"), "VERB");
+        .appendField(verbField, "VERB");
       this.appendDummyInput()
         .appendField("description")
         .appendField(new Blockly.FieldTextInput(""), "DESCRIPTION");
@@ -37,10 +63,7 @@ export function registerToolBlocks(): void {
       this.appendStatementInput("CLAMP").setCheck("ClampSlot").appendField("clamp (optional)");
       this.appendStatementInput("AFTER").setCheck(["Action", "StepListItem"]).appendField("after");
       this.setColour(0);
-      this.setTooltip(
-        "Override the description and/or behavior of an existing primitive verb. " +
-          "When/clamp/after are optional but at least one must be set.",
-      );
+      this.setTooltip(tipFor("verb"));
     },
   };
 

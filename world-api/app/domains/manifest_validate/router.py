@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+import yaml
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -251,6 +252,95 @@ async def validate_manifest(
 # ---------------------------------------------------------------------------
 # /admin/verb-catalog — read-only verb spec for the block editor
 # ---------------------------------------------------------------------------
+
+
+@router.post("/simulate-tick")
+async def simulate_tick(
+    manifest: UploadFile = File(..., description="YAML manifest"),
+):
+    """Run the reflex engine and tool dispatcher against a synthetic
+    perception to show the user what would happen on tick 0. Powers
+    the first-tick simulation panel in the block editor (Phase 1+).
+
+    No DB; no actual gameplay state. The synthetic perception sets
+    sensible defaults: full HP, market_square zone, no hostiles, full
+    inventory. The point is to surface which reflex would fire (or
+    `wait` if none match) and what tools the LLM would see.
+    """
+    raw = await manifest.read()
+    try:
+        doc = yaml.safe_load(raw) or {}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"yaml parse failed: {exc}")
+    if not isinstance(doc, dict):
+        raise HTTPException(status_code=400, detail="manifest must be a mapping")
+
+    inner = doc.get("hero") if isinstance(doc.get("hero"), dict) else doc
+    inner = inner or {}
+
+    from arena_bot.actions import DEFAULT_TOOLS
+    from arena_bot.client import Perception
+    from arena_bot.reflexes import ReflexEngine
+    from arena_bot.tool_dispatch import HeroToolset
+    from arena_bot.tools import build_tool_specs_for_hero
+
+    reflex_engine = ReflexEngine(inner.get("reflexes") or [])
+    toolset = HeroToolset.from_manifest(doc)
+
+    # Synthetic perception — sufficient for a deterministic dry-run.
+    perception = Perception(
+        tick_id=0,
+        your_state={
+            "hp": 30,
+            "gold": 100,
+            "zone": "market_square",
+            "pos": [4, 4],
+            "mana_current": 10,
+            "mana_max": 10,
+            "equipped": {},
+            "inventory": [],
+            "skills": {},
+        },
+        perception={
+            "visible_npcs": [],
+            "visible_heroes": [],
+            "visible_items": [],
+            "visible_resources": [],
+            "memory": {"npcs": {}},
+            "zone": {"connections": [], "kind": "sanctuary"},
+            "inventory": [],
+        },
+        deadline_ms=6000,
+    )
+
+    chosen_reflex_index: int | None = None
+    chosen_action: dict | None = None
+    when_text: str | None = None
+    try:
+        action, debug = reflex_engine.evaluate_with_debug(perception)
+        if action is not None:
+            chosen_action = dict(action)
+            chosen_reflex_index = (debug or {}).get("reflex_index")
+            when_text = (debug or {}).get("when")
+    except Exception:
+        chosen_action = None
+
+    manifest_tools = (
+        list(toolset.composites.values()) + list(toolset.overrides.values())
+    )
+    specs = build_tool_specs_for_hero(list(DEFAULT_TOOLS), manifest_tools)
+
+    return {
+        "chosen_reflex_index": chosen_reflex_index,
+        "chosen_action": chosen_action or {"do": "wait", "_note": "no reflex matched"},
+        "when": when_text,
+        "tools_visible_to_llm": [
+            {"name": s["function"]["name"], "description": s["function"]["description"][:120]}
+            for s in specs
+        ],
+        "composite_count": len(toolset.composites),
+        "override_count": len(toolset.overrides),
+    }
 
 
 @admin_router.get("/hero/{hero_id}/tool-spec")

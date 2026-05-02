@@ -32,18 +32,37 @@ export function registerActionBlocks(): void {
     Blockly.Blocks[`verb_${v.verb}`] = makeBlockInit(v);
   }
 
-  // do_composite — references a composite tool by name (free-text for
-  // v1; the deploy editor surfaces the list in autocomplete via the
-  // toolbox category dynamic generator).
+  // do_composite — live dropdown of composite tool names defined in the
+  // current workspace. Falls back to a free-text input if no composites
+  // exist (so the block is always placeable from the toolbox).
   Blockly.Blocks["do_composite"] = {
     init(this: Blockly.Block) {
+      const block = this;
+      const generateOptions = (): [string, string][] => {
+        const ws = block.workspace;
+        if (!ws) return [["composite_name", "composite_name"]];
+        const composites: [string, string][] = [];
+        for (const b of ws.getAllBlocks(false)) {
+          if (b.type === "tool_composite" && b.id !== block.id) {
+            const name = b.getFieldValue("NAME");
+            if (typeof name === "string" && name) {
+              composites.push([name, name]);
+            }
+          }
+        }
+        if (composites.length === 0) return [["(no composites yet)", ""]];
+        return composites;
+      };
       this.appendDummyInput()
         .appendField("do composite")
-        .appendField(new Blockly.FieldTextInput("composite_name"), "NAME");
+        .appendField(new Blockly.FieldDropdown(generateOptions), "NAME");
       this.setPreviousStatement(true, ["Action", "StepListItem"]);
       this.setNextStatement(true, ["Action", "StepListItem"]);
       this.setColour(40);
-      this.setTooltip("Call another composite tool defined in this manifest");
+      this.setTooltip(
+        "Call another composite tool defined in this manifest. " +
+          "Dropdown updates live as you add/rename composites.",
+      );
     },
   };
 

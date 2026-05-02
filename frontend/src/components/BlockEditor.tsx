@@ -20,12 +20,31 @@ import type { ParsedManifest } from "@/lib/blockEditor";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
+function blockIdForPath(path: string | undefined): string | null {
+  if (!path) return null;
+  // Match leading "tools[N]" / "reflexes[N]" / "abilities.NAME"
+  const tools = path.match(/^tools\[(\d+)\]/);
+  if (tools) return `tools_${tools[1]}`;
+  const reflexes = path.match(/^reflexes\[(\d+)\]/);
+  if (reflexes) return `reflex_${reflexes[1]}`;
+  const abilities = path.match(/^abilities\.([a-zA-Z0-9_]+)/);
+  if (abilities) return `ability_${abilities[1]}`;
+  return null;
+}
+
+type ValidationIssue = {
+  severity: string;
+  message: string;
+  path?: string;
+};
+
 type Props = {
   value: string;
   onChange: (next: string) => void;
+  validationIssues?: ValidationIssue[];
 };
 
-export default function BlockEditor({ value, onChange }: Props) {
+export default function BlockEditor({ value, onChange, validationIssues }: Props) {
   const wsRef = useRef<HTMLDivElement | null>(null);
   const workspace = useRef<Blockly.WorkspaceSvg | null>(null);
   const extras = useRef<ParsedManifest["extras"]>({});
@@ -112,6 +131,32 @@ export default function BlockEditor({ value, onChange }: Props) {
       setError(e?.message ?? "parse failed");
     }
   }, [value]);
+
+  // Apply server validation issues as block warnings. Path mapping:
+  //   "tools[2]"            → block id "tools_2"
+  //   "tools[2].clamp.X"    → block id "tools_2"  (whole tool flagged)
+  //   "reflexes[0]"         → block id "reflex_0"
+  // Other paths surface only as the global error banner.
+  useEffect(() => {
+    if (!workspace.current) return;
+    // Clear all warnings.
+    for (const b of workspace.current.getAllBlocks(false)) {
+      b.setWarningText(null);
+    }
+    if (!validationIssues) return;
+    const messages = new Map<string, string[]>();
+    for (const issue of validationIssues) {
+      if (issue.severity !== "error") continue;
+      const id = blockIdForPath(issue.path);
+      if (!id) continue;
+      if (!messages.has(id)) messages.set(id, []);
+      messages.get(id)!.push(issue.message);
+    }
+    for (const [id, msgs] of messages) {
+      const block = workspace.current.getBlockById(id);
+      if (block) block.setWarningText(msgs.join("\n"));
+    }
+  }, [validationIssues]);
 
   return (
     <div className="border border-border">
