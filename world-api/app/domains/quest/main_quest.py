@@ -108,14 +108,19 @@ def advance_main_quest(db: Session, hero: Hero, claimed_slug: str) -> dict | Non
     awarded: dict = {"main_quest_step": claimed_slug}
 
     if step["award_title"]:
-        mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
+        from app.core.memory import update_memory
+
+        mem = hero.memory if isinstance(hero.memory, dict) else {}
         titles = list(mem.get("titles") or [])
         if step["award_title"] not in titles:
             titles.append(step["award_title"])
-        mem["titles"] = titles
-        # Convenience pointer to the *latest* title for UI rendering.
-        mem["title"] = step["award_title"]
-        hero.memory = mem
+        update_memory(
+            db, hero,
+            source=f"main_quest_step:{step['slug']}",
+            titles=titles,
+            # Convenience pointer to the *latest* title for UI rendering.
+            title=step["award_title"],
+        )
         awarded["title"] = step["award_title"]
 
     next_slug = step.get("next_slug")

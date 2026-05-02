@@ -51,7 +51,10 @@ def close_due_tournaments(db: Session, current_tick: int) -> list[str]:
 
         # Pay out prize to winner
         if winner is not None:
-            _set_hero_gold(winner, _hero_gold(winner) + int(t.prize_gold or 0))
+            _set_hero_gold(
+                db, winner, _hero_gold(winner) + int(t.prize_gold or 0),
+                source="tournament_prize",
+            )
             if t.prize_faction and t.prize_faction_amount:
                 _grant_rep(winner, t.prize_faction, int(t.prize_faction_amount), db=db)
             _journal_milestone(

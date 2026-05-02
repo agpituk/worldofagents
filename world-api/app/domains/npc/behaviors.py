@@ -37,14 +37,16 @@ def _hero_state_for(hero: Hero, slug: str) -> str:
     return state
 
 
-def _set_hero_state(hero: Hero, slug: str, new_state: str) -> None:
-    memory = dict(hero.memory) if isinstance(hero.memory, dict) else {}
+def _set_hero_state(db: Session, hero: Hero, slug: str, new_state: str) -> None:
+    """Update memory["npcs"][slug]["state"] with audit emission (P3-1)."""
+    from app.core.memory import update_memory
+
+    memory = hero.memory if isinstance(hero.memory, dict) else {}
     by_npc = dict(memory.get("npcs", {}))
     npc_entry = dict(by_npc.get(slug, {}))
     npc_entry["state"] = new_state
     by_npc[slug] = npc_entry
-    memory["npcs"] = by_npc
-    hero.memory = memory  # full reassign so SQLAlchemy sees a change on JSON
+    update_memory(db, hero, source=f"npc_state:{slug}", npcs=by_npc)
 
 
 def _create_item_for(db: Session, hero: Hero, spec: dict[str, Any]) -> Item:
@@ -320,11 +322,11 @@ def apply_effects(db: Session, npc: NPC, hero: Hero, effects: list[Effect]) -> l
         if "speak" in eff:
             summaries.append({"npc": npc.slug, "speak": eff["speak"]})
         if "set_state" in eff:
-            _set_hero_state(hero, npc.slug, eff["set_state"])
+            _set_hero_state(db, hero, npc.slug, eff["set_state"])
             summaries.append({"npc": npc.slug, "state": eff["set_state"]})
         if "set_state_for" in eff:
             other_slug, new_state = eff["set_state_for"]
-            _set_hero_state(hero, other_slug, new_state)
+            _set_hero_state(db, hero, other_slug, new_state)
             summaries.append({"npc": other_slug, "state": new_state, "indirect": True})
         if "give_item" in eff:
             item = _create_item_for(db, hero, eff["give_item"])
@@ -337,10 +339,10 @@ def apply_effects(db: Session, npc: NPC, hero: Hero, effects: list[Effect]) -> l
             summaries.append({"npc": npc.slug, "rep_faction": faction, "rep_delta": int(amount)})
         if "reward_gold" in eff:
             # Hero gold field doesn't exist yet — record it for now, wire to a column later.
-            memory = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-            memory["gold"] = int(memory.get("gold", 0)) + int(eff["reward_gold"])
-            hero.memory = memory
-            summaries.append({"npc": npc.slug, "reward_gold": eff["reward_gold"], "total_gold": memory["gold"]})
+            from app.core.actions import _hero_gold, _set_hero_gold
+            new_gold = _hero_gold(hero) + int(eff["reward_gold"])
+            _set_hero_gold(db, hero, new_gold, source=f"npc_reward:{npc.slug}")
+            summaries.append({"npc": npc.slug, "reward_gold": eff["reward_gold"], "total_gold": new_gold})
         if "consume_item" in eff:
             item_id = eff["consume_item"]
             try:

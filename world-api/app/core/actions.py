@@ -22,6 +22,7 @@ from app.core.hero_budgets import (
     perception_budget,
     perception_token_ceiling,
 )
+from app.core.memory import replace_memory, update_memory
 from app.core.models import Bounty, Building, Hero, Item, JournalEntry, NPC, Quest, QuestTemplate, Recipe, ResourceNode, Spell, Tournament, TournamentEntry, TradeOffer, Zone
 
 # Per-tick transient state for `defend` — heroes who declared defend get +5 AC for
@@ -222,7 +223,7 @@ def _resolve_buy_house(db: Session, hero: Hero, action: dict[str, Any]) -> Resol
     if gold < b.gold_cost:
         return ResolutionResult(False, {"verb": "buy_house", "error": f"insufficient gold ({gold} < {b.gold_cost})"})
 
-    _set_hero_gold(hero, gold - b.gold_cost)
+    _set_hero_gold(db, hero, gold - b.gold_cost, source="buy_house")
     b.owner_hero_id = hero.id
     _journal_milestone(
         db, hero,
@@ -277,7 +278,7 @@ def _resolve_post_bounty(db: Session, hero: Hero, action: dict[str, Any]) -> Res
 
     # Burn the gold up front. If the bounty is never claimed, gold is
     # effectively destroyed — the player paid for the public threat.
-    _set_hero_gold(hero, _hero_gold(hero) - gold)
+    _set_hero_gold(db, hero, _hero_gold(hero) - gold, source="post_bounty")
 
     bounty = Bounty(
         id=uuid.uuid4(),
@@ -321,7 +322,7 @@ def _claim_bounties_on_kill(db: Session, killer: Hero, victim_id: uuid.UUID, cur
     for b in open_bounties:
         if b.poster_hero_id == killer.id:
             # Self-posted bounty — refund instead of paying out.
-            _set_hero_gold(killer, _hero_gold(killer) + b.gold)
+            _set_hero_gold(db, killer, _hero_gold(killer) + b.gold, source="bounty_refund")
             b.status = "expired"
             continue
         b.status = "claimed"
@@ -330,7 +331,7 @@ def _claim_bounties_on_kill(db: Session, killer: Hero, victim_id: uuid.UUID, cur
         total_payout += b.gold
         payouts.append({"bounty_id": str(b.id), "gold": b.gold, "poster": b.poster_name})
     if total_payout > 0:
-        _set_hero_gold(killer, _hero_gold(killer) + total_payout)
+        _set_hero_gold(db, killer, _hero_gold(killer) + total_payout, source="bounty_claim")
         _journal_milestone(
             db, killer,
             text=f"Claimed {total_payout}g in bounties on {open_bounties[0].target_name}.",
@@ -508,8 +509,8 @@ def _resolve_accept_offer(db: Session, hero: Hero, action: dict[str, Any]) -> Re
         _consume_from_inventory(db, other, entry["slug"], entry["qty"])
         _add_to_inventory(db, hero, slug=entry["slug"], name=name, kind=kind, props=props, description=desc, qty=entry["qty"])
     if offer.offered_gold:
-        _set_hero_gold(other, _hero_gold(other) - offer.offered_gold)
-        _set_hero_gold(hero, _hero_gold(hero) + offer.offered_gold)
+        _set_hero_gold(db, other, _hero_gold(other) - offer.offered_gold, source="trade_accept")
+        _set_hero_gold(db, hero, _hero_gold(hero) + offer.offered_gold, source="trade_accept")
 
     for entry in (offer.wanted_items or []):
         stack = _inventory_stack(db, hero, entry["slug"])
@@ -519,8 +520,8 @@ def _resolve_accept_offer(db: Session, hero: Hero, action: dict[str, Any]) -> Re
         _consume_from_inventory(db, hero, entry["slug"], entry["qty"])
         _add_to_inventory(db, other, slug=entry["slug"], name=name, kind=kind, props=props, description=desc, qty=entry["qty"])
     if offer.wanted_gold:
-        _set_hero_gold(hero, _hero_gold(hero) - offer.wanted_gold)
-        _set_hero_gold(other, _hero_gold(other) + offer.wanted_gold)
+        _set_hero_gold(db, hero, _hero_gold(hero) - offer.wanted_gold, source="trade_accept")
+        _set_hero_gold(db, other, _hero_gold(other) + offer.wanted_gold, source="trade_accept")
 
     offer.status = "accepted"
     return ResolutionResult(True, {
@@ -853,12 +854,11 @@ def _resolve_craft(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
     # it once per hero, with a loud milestone the spectator stream picks up.
     discovery: bool = False
     if recipe.hidden:
-        mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
+        mem = hero.memory if isinstance(hero.memory, dict) else {}
         discovered = list(mem.get("discovered_recipes") or [])
         if recipe.slug not in discovered:
             discovered.append(recipe.slug)
-            mem["discovered_recipes"] = discovered
-            hero.memory = mem
+            update_memory(db, hero, source="craft_hidden", discovered_recipes=discovered)
             discovery = True
             _journal_milestone(
                 db, hero,
@@ -892,10 +892,13 @@ def _hero_gold(hero: Hero) -> int:
     return int(mem.get("gold", 0) or 0)
 
 
-def _set_hero_gold(hero: Hero, value: int) -> None:
-    mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-    mem["gold"] = max(0, value)
-    hero.memory = mem
+def _set_hero_gold(db: Session, hero: Hero, value: int, *, source: str) -> None:
+    """Update hero.memory.gold with audit emission (P3-1).
+
+    `source` should name the verb/event causing the change (e.g.
+    'buy_house', 'tournament_prize', 'pvp_loot') so the spectator UI
+    can render gold flows attributed to the action that caused them."""
+    update_memory(db, hero, source=source, gold=max(0, value))
 
 
 def _effective_buy_price(entry: dict) -> int:
@@ -951,7 +954,7 @@ def _resolve_buy(db: Session, hero: Hero, action: dict[str, Any]) -> ResolutionR
             False, {"verb": "buy", "error": f"insufficient gold ({gold} < {total_cost})"}
         )
 
-    _set_hero_gold(hero, gold - total_cost)
+    _set_hero_gold(db, hero, gold - total_cost, source="buy")
     _add_to_inventory(
         db, hero,
         slug=entry["slug"],
@@ -1039,9 +1042,10 @@ def _resolve_cast(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
                 target_npc.alive = False
                 loot_gold = target_npc.loot_gold
                 if loot_gold > 0:
-                    mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-                    mem["gold"] = int(mem.get("gold", 0) or 0) + loot_gold
-                    hero.memory = mem
+                    _set_hero_gold(
+                        db, hero, _hero_gold(hero) + loot_gold,
+                        source="attack_loot",
+                    )
             outcome.update(
                 target=target_npc.slug, target_kind="npc", damage=damage,
                 target_hp_remaining=target_npc.hp_current, killed=killed, loot_gold=loot_gold,
@@ -1215,7 +1219,7 @@ def _resolve_claim_reward(db: Session, hero: Hero, action: dict[str, Any]) -> Re
 
     quest.status = "claimed"
     if tpl.reward_gold:
-        _set_hero_gold(hero, _hero_gold(hero) + tpl.reward_gold)
+        _set_hero_gold(db, hero, _hero_gold(hero) + tpl.reward_gold, source="quest_reward")
     if tpl.reward_faction and tpl.reward_faction_amount:
         _grant_rep(hero, tpl.reward_faction, tpl.reward_faction_amount, db=db)
     _journal_milestone(
@@ -1318,13 +1322,12 @@ def _resolve_steal(db: Session, hero: Hero, action: dict[str, Any]) -> Resolutio
         _grant_xp(hero, "stealth", 2)
         outcome["stealth_xp"] = int((hero.skills or {}).get("stealth", 0) or 0)
     else:
-        mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
+        mem = hero.memory if isinstance(hero.memory, dict) else {}
         notes = dict(mem.get("npcs", {}))
         npc_entry = dict(notes.get(npc.slug, {}))
         npc_entry["aware_of_theft"] = True
         notes[npc.slug] = npc_entry
-        mem["npcs"] = notes
-        hero.memory = mem
+        update_memory(db, hero, source="steal_caught", npcs=notes)
         outcome["caught"] = True
 
     # Stealing always carries a faction cost — caught or not, the act is
@@ -1388,7 +1391,7 @@ def _resolve_sell(db: Session, hero: Hero, action: dict[str, Any]) -> Resolution
     unit_price = _effective_sell_price(entry)
     payout = unit_price * qty
     _consume_from_inventory(db, hero, item_slug, qty)
-    _set_hero_gold(hero, _hero_gold(hero) + payout)
+    _set_hero_gold(db, hero, _hero_gold(hero) + payout, source="sell")
 
     # Increment merchant's stock if it tracks qty.
     if entry.get("qty") is not None:
@@ -1789,9 +1792,10 @@ def _resolve_attack(db: Session, hero: Hero, action: dict[str, Any]) -> Resoluti
         target.alive = False
         loot_gold = target.loot_gold
         if loot_gold > 0:
-            mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-            mem["gold"] = int(mem.get("gold", 0)) + loot_gold
-            hero.memory = mem
+            _set_hero_gold(
+                db, hero, _hero_gold(hero) + loot_gold,
+                source="attack_mob_loot",
+            )
         _grant_xp(hero, "melee", 5)
         completed_quests = _quest_progress(db, hero, "kill_count", target.slug, 1)
         _grant_rep(hero, "council", 1, db=db)
@@ -1945,15 +1949,11 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
         if bounty_payouts:
             outcome["bounties_claimed"] = bounty_payouts
         # 50% of victim's gold goes to the killer (per DESIGN.md §6 #6).
-        victim_mem = dict(target.memory) if isinstance(target.memory, dict) else {}
-        victim_gold = int(victim_mem.get("gold", 0) or 0)
+        victim_gold = _hero_gold(target)
         looted_gold = victim_gold // 2
         if looted_gold > 0:
-            victim_mem["gold"] = victim_gold - looted_gold
-            target.memory = victim_mem
-            killer_mem = dict(hero.memory) if isinstance(hero.memory, dict) else {}
-            killer_mem["gold"] = int(killer_mem.get("gold", 0) or 0) + looted_gold
-            hero.memory = killer_mem
+            _set_hero_gold(db, target, victim_gold - looted_gold, source="pvp_looted")
+            _set_hero_gold(db, hero, _hero_gold(hero) + looted_gold, source="pvp_loot")
 
     outcome.update(
         hit=True, damage=damage,
