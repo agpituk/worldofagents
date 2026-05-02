@@ -1,1 +1,1 @@
-from app.domains.showcase.router import router  # noqa: F401
+from app.domains.showcase.router import compare_router, router  # noqa: F401

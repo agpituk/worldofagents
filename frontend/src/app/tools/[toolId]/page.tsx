@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { WORLD_API_URL } from "@/lib/api";
+import CopyToolModal from "@/components/showcase/CopyToolModal";
 
 type ToolDetail = {
   tool_id: string;
@@ -24,6 +25,7 @@ export default function ToolDetailPage({
   const [data, setData] = useState<ToolDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showCopyModal, setShowCopyModal] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -95,18 +97,35 @@ export default function ToolDetailPage({
         <pre className="font-mono text-xs text-zinc-300 border border-zinc-800 rounded p-3 whitespace-pre-wrap overflow-auto">
           {data.canonical_yaml}
         </pre>
-        <button
-          type="button"
-          onClick={() => {
-            navigator.clipboard.writeText(data.canonical_yaml);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-          className="mt-2 text-xs px-2 py-1 border border-zinc-700 rounded hover:border-zinc-600 hover:bg-zinc-900"
-        >
-          {copied ? "copied!" : "Copy YAML to clipboard"}
-        </button>
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard.writeText(data.canonical_yaml);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            }}
+            className="text-xs px-2 py-1 border border-zinc-700 rounded hover:border-zinc-600 hover:bg-zinc-900"
+          >
+            {copied ? "copied!" : "Copy YAML to clipboard"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowCopyModal(true)}
+            className="text-xs px-2 py-1 border border-emerald-700 bg-emerald-950/30 text-emerald-200 rounded hover:bg-emerald-900/40"
+          >
+            Copy this tool to my hero
+          </button>
+        </div>
       </section>
+
+      {showCopyModal && (
+        <CopyToolModal
+          toolId={data.tool_id}
+          toolName={data.name}
+          onClose={() => setShowCopyModal(false)}
+        />
+      )}
 
       <section className="mt-6">
         <h2 className="text-sm uppercase tracking-wide text-zinc-400 mb-2">

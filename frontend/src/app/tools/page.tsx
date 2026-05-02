@@ -36,27 +36,42 @@ const BOARDS: { id: Board; title: string; subtitle: string }[] = [
   {
     id: "most_called",
     title: "Most called",
-    subtitle: "Coming soon",
+    subtitle: "Total LLM expansions across the recent event window",
   },
   {
     id: "highest_lift",
     title: "Highest survival lift",
-    subtitle: "Coming soon (suggestive, not causal)",
+    subtitle: "Median lifespan delta vs heroes without the tool — suggestive, not causal",
+  },
+  {
+    id: "david",
+    title: "David tools",
+    subtitle: "Featherweight-authored tools punching above their weight",
+  },
+  {
+    id: "best_named",
+    title: "Best named",
+    subtitle: "Pick rate when offered — tools whose description does the work",
   },
 ];
 
 export default function ToolsPage() {
   const [board, setBoard] = useState<Board>("most_copied");
   const [entries, setEntries] = useState<LeaderboardEntry[] | null>(null);
+  const [honesty, setHonesty] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     setEntries(null);
+    setHonesty(null);
     fetch(`${WORLD_API_URL}/api/tools/leaderboards?board=${board}`)
       .then((r) => r.json())
       .then((body) => {
-        if (live) setEntries(body.entries ?? []);
+        if (live) {
+          setEntries(body.entries ?? []);
+          setHonesty(body.honesty ?? null);
+        }
       })
       .catch((e) => {
         if (live) setError(e?.message ?? "load failed");
@@ -97,6 +112,12 @@ export default function ToolsPage() {
       <p className="text-xs text-zinc-500 mb-4">
         {BOARDS.find((b) => b.id === board)?.subtitle}
       </p>
+
+      {honesty && (
+        <div className="mb-4 px-3 py-2 border border-amber-800 bg-amber-950/30 text-xs text-amber-200">
+          ⚠ {honesty}
+        </div>
+      )}
 
       {error && <p className="text-rose-400">Error: {error}</p>}
       {!error && entries === null && (
