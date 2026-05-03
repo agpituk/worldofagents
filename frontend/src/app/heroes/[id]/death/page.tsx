@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
-import { WORLD_API_URL } from "@/lib/api";
+import { api } from "@/lib/api";
 import { formatLifespan } from "@/lib/format";
 
 type DeathPage = {
@@ -35,13 +35,11 @@ export default function DeathPageRoute({ params }: { params: Promise<{ id: strin
     let live = true;
     async function load() {
       try {
-        const r = await fetch(`${WORLD_API_URL}/heroes/${id}/death`, { cache: "no-store" });
-        if (r.status === 404) {
+        const data = await api.heroDeath(id);
+        if (data === null) {
           if (live) setError("Hero is alive — this monument hasn't been written.");
           return;
         }
-        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-        const data = await r.json();
         if (live) setDeath(data);
       } catch (e: any) {
         if (live) setError(e?.message ?? "fetch failed");

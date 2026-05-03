@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { WORLD_API_URL } from "@/lib/api";
+import { api } from "@/lib/api";
 
 type Card = {
   tool_id: string;
@@ -30,11 +30,7 @@ export default function GalleryPage() {
   useEffect(() => {
     let live = true;
     setData(null);
-    const url = category
-      ? `${WORLD_API_URL}/api/tools-gallery?category=${category}`
-      : `${WORLD_API_URL}/api/tools-gallery`;
-    fetch(url)
-      .then((r) => r.json())
+    api.toolsGallery(category)
       .then((d) => {
         if (live) setData(d);
       })

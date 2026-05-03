@@ -19,7 +19,6 @@ Covers Phase 2 + Phase 3:
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,6 +29,11 @@ from arena_bot.reflex_sandbox import (
     UnsafeExpression,
     sandbox_eval,
     sandbox_eval_bool,
+)
+from arena_bot.tool_args import (
+    apply_defaults as _apply_defaults,
+    resolve_args as _resolve_args,
+    resolve_value as _resolve_value,
 )
 from arena_bot.tool_schema import (
     CompositeTool,
@@ -441,77 +445,6 @@ def _walk_steps(
             })
 
 
-def _apply_defaults(
-    args: dict[str, Any], param_defs: list[ParamDef]
-) -> dict[str, Any]:
-    out = dict(args)
-    for p in param_defs:
-        if p.name not in out and not p.required and p.default is not None:
-            out[p.name] = p.default
-    return out
-
-
-_INTERP_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
-
-
-def _resolve_args(
-    step_args: dict[str, Any],
-    parent_args: dict[str, Any],
-    namespace: dict[str, Any],
-) -> dict[str, Any]:
-    """GRAMMAR.md §5.3 interpolation:
-      • String values containing `{{ expr }}` — render through sandbox,
-        result coerced to string (each {{ }} block independently).
-      • Dict value `{_expr: "..."}` — evaluate; result keeps native type.
-      • Other values pass through.
-    """
-    out: dict[str, Any] = {}
-    for k, v in step_args.items():
-        out[k] = _resolve_value(v, parent_args, namespace)
-    return out
-
-
-def _resolve_value(
-    v: Any, parent_args: dict[str, Any], namespace: dict[str, Any],
-) -> Any:
-    if isinstance(v, dict) and set(v.keys()) == {"_expr"}:
-        try:
-            return sandbox_eval(
-                v["_expr"], namespace=namespace, args=parent_args,
-            )
-        except Exception:
-            return None
-    if isinstance(v, str) and "{{" in v:
-        return _interpolate_string(v, parent_args, namespace)
-    if isinstance(v, list):
-        return [_resolve_value(x, parent_args, namespace) for x in v]
-    if isinstance(v, dict):
-        return {k: _resolve_value(x, parent_args, namespace) for k, x in v.items()}
-    return v
-
-
-def _interpolate_string(
-    s: str, parent_args: dict[str, Any], namespace: dict[str, Any],
-) -> str:
-    """Replace each {{ expr }} with its evaluated value (cast to str).
-    If a single {{ }} block spans the whole string and the result is
-    not a string, return the native value — this preserves the common
-    case `{{ args.dest }}` for slug pass-through without stringifying."""
-    stripped = s.strip()
-    m = _INTERP_RE.fullmatch(stripped)
-    if m is not None:
-        expr = m.group(1).strip()
-        try:
-            return sandbox_eval(expr, namespace=namespace, args=parent_args)
-        except Exception:
-            return s
-
-    def _replace(match: re.Match) -> str:
-        expr = match.group(1).strip()
-        try:
-            value = sandbox_eval(expr, namespace=namespace, args=parent_args)
-        except Exception:
-            return match.group(0)
-        return str(value)
-
-    return _INTERP_RE.sub(_replace, s)
+# Argument-resolution helpers moved to `arena_bot.tool_args` and re-imported
+# above as `_apply_defaults`, `_resolve_args`, `_resolve_value` for backwards
+# compat with anything that monkey-patched them via this module.

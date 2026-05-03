@@ -293,6 +293,40 @@ export const api = {
     }
     return await r.json();
   },
+  // Showcase / tools meta surface (separate from the inspector's `toolDetail`)
+  toolLeaderboard: (board: string) =>
+    fetchJson<{ entries: any[]; honesty: string | null }>(
+      `/api/tools/leaderboards?board=${board}`,
+    ),
+  toolMeta: (toolId: string) => fetchJson<any>(`/api/tools/${toolId}`),
+  toolsGallery: (category?: string | null) =>
+    fetchJson<any>(
+      category ? `/api/tools-gallery?category=${category}` : `/api/tools-gallery`,
+    ),
+  compareHeroes: (heroesCsv: string) =>
+    fetchJson<any>(`/api/compare?heroes=${encodeURIComponent(heroesCsv)}`),
+  // Returns null when the hero is still alive (404), throws on other errors.
+  heroDeath: async (id: string): Promise<any | null> => {
+    const r = await fetch(`${WORLD_API_URL}/heroes/${id}/death`, { cache: "no-store" });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return r.json();
+  },
+  copyTool: async (
+    toolId: string,
+    byHero: string,
+    rename?: string,
+  ): Promise<{ appended?: boolean; rename_to?: string; [k: string]: any }> => {
+    const url = new URL(`${WORLD_API_URL}/api/tools/${toolId}/copy`);
+    url.searchParams.set("by_hero", byHero);
+    if (rename) url.searchParams.set("rename", rename);
+    const r = await fetch(url.toString(), { method: "POST" });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail?.detail ?? `HTTP ${r.status}`);
+    }
+    return r.json();
+  },
   postSpectatorBounty: async (body: {
     target_name: string;
     gold: number;

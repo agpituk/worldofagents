@@ -29,30 +29,20 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.models import NPC, Recipe, Spell, Zone
+from app.core.verbs import VALID_VERBS
 from app.domains.hero.service import HeroService
 from app.domains.manifest_validate.clamp_table import CLAMP_TABLE
 from app.domains.manifest_validate.tools_validator import validate_tools
+
+# Re-exported here so existing imports `from ...router import VALID_VERBS`
+# keep working. New code should import from app.core.verbs directly.
+__all__ = ["VALID_VERBS"]
 
 router = APIRouter(prefix="/manifest", tags=["manifest"])
 
 # A second router so the verb-catalog endpoint mounts under /admin without
 # moving the existing /manifest/validate path.
 admin_router = APIRouter(prefix="/admin", tags=["admin"])
-
-
-# Verbs the world resolves today. Drift here means an out-of-date
-# validator, not a runtime bug — the resolver is still authoritative.
-VALID_VERBS = {
-    "wait", "look", "move", "say", "examine", "pickup", "drop", "give",
-    "travel", "equip", "unequip", "gather", "fish", "craft",
-    "buy", "sell", "cast", "learn", "steal", "tame",
-    "accept_quest", "claim_reward", "journal_write", "recall",
-    "store", "withdraw", "buy_house",
-    "offer", "accept_offer", "reject_offer",
-    "register_tournament", "post_bounty",
-    "post_contract", "claim_contract", "cancel_contract",
-    "attack", "attack_hero", "defend", "flee", "leave_sandbox",
-}
 
 
 class Issue(BaseModel):

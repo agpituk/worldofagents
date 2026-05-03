@@ -191,10 +191,18 @@ def test_build_cq_exchange_missing_creds_falls_through(monkeypatch, caplog):
 
 
 def test_build_cq_enabled_but_unimportable_falls_through(monkeypatch, caplog):
-    """CQ_ENABLED set but `cq` package missing → warning + SQL fallback."""
+    """CQ_ENABLED set but `cq` package missing → warning + SQL fallback.
+
+    The world-api container conditionally installs `cq-sdk` when
+    CQ_ENABLED=1, so this test can no longer rely on cq being absent
+    from the import path. Instead, force the import to fail by poisoning
+    sys.modules — this is what an operator-level cq misconfiguration
+    looks like at runtime."""
+    import sys
+
     monkeypatch.setenv("CQ_ENABLED", "1")
     monkeypatch.delenv("CQ_EXCHANGE_ENABLED", raising=False)
-    # Sandbox doesn't have `cq` installed; the import will fail.
+    monkeypatch.setitem(sys.modules, "cq", None)
     with caplog.at_level(logging.WARNING, logger="world.retriever"):
         r = _build_retriever()
     assert isinstance(r, SqlRetriever)

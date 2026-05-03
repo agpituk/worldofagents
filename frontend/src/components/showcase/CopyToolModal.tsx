@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { WORLD_API_URL } from "@/lib/api";
+import { api } from "@/lib/api";
 
 type Hero = { id: string; name: string; alive: boolean };
 
@@ -21,9 +21,8 @@ export default function CopyToolModal({ toolId, toolName, onClose }: Props) {
   const [success, setSuccess] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${WORLD_API_URL}/heroes`)
-      .then((r) => r.json())
-      .then((rows: any[]) =>
+    api.listHeroes()
+      .then((rows) =>
         setHeroes(
           rows
             .filter((h) => h.status === "alive")
@@ -38,18 +37,7 @@ export default function CopyToolModal({ toolId, toolName, onClose }: Props) {
     setSubmitting(true);
     setError(null);
     try {
-      const url = new URL(
-        `${WORLD_API_URL}/api/tools/${toolId}/copy`,
-      );
-      url.searchParams.set("by_hero", selectedHero);
-      if (renameTo) url.searchParams.set("rename", renameTo);
-
-      const r = await fetch(url.toString(), { method: "POST" });
-      if (!r.ok) {
-        const detail = await r.json().catch(() => ({}));
-        throw new Error(detail?.detail ?? `HTTP ${r.status}`);
-      }
-      const body = await r.json();
+      const body = await api.copyTool(toolId, selectedHero, renameTo || undefined);
       if (body.appended) {
         setSuccess(
           `Added "${renameTo || toolName}" to ${

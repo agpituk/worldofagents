@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { WORLD_API_URL } from "@/lib/api";
+import { api } from "@/lib/api";
 
 type LeaderboardEntry = {
   tool_id: string;
@@ -65,8 +65,7 @@ export default function ToolsPage() {
     let live = true;
     setEntries(null);
     setHonesty(null);
-    fetch(`${WORLD_API_URL}/api/tools/leaderboards?board=${board}`)
-      .then((r) => r.json())
+    api.toolLeaderboard(board)
       .then((body) => {
         if (live) {
           setEntries(body.entries ?? []);

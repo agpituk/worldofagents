@@ -1,4 +1,4 @@
-"""Hero client.
+"""Hero client — WS connection + LLM driver helpers.
 
 Two-layer decision API:
   • Low-level: override `decide(perception)` to return a Decision (reflex or llm).
@@ -9,6 +9,10 @@ Two-layer decision API:
 For dev iteration, use `Hero.connect()` instead of `register()`. It caches
 credentials in `<manifest_dir>/.arena-cache/<slug>.json` and resumes across
 runs and DB wipes.
+
+The JSON parser, prompt builders, and Perception/Decision dataclasses live
+in sibling modules (`parser`, `prompt`, `types`) — re-exported below for
+back-compat with anything that historically imported them from this module.
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +27,38 @@ import httpx
 import websockets
 import yaml
 
+from arena_bot.parser import (
+    PARSE_REASON_EMPTY,
+    PARSE_REASON_INVALID_JSON,
+    PARSE_REASON_MISSING_DO,
+    PARSE_REASON_MULTIPLE_OBJECTS,
+    PARSE_REASON_NO_JSON,
+    PARSE_REASON_NOT_OBJECT,
+    ParseError,
+    parse_json_action,
+)
+from arena_bot.prompt import build_action_prompt, build_tool_action_prompt
+from arena_bot.types import Decision, Perception
+
 log = logging.getLogger("arena_bot")
+
+
+# Re-export so existing `from arena_bot.client import …` imports keep working.
+__all__ = [
+    "Decision",
+    "Hero",
+    "PARSE_REASON_EMPTY",
+    "PARSE_REASON_INVALID_JSON",
+    "PARSE_REASON_MISSING_DO",
+    "PARSE_REASON_MULTIPLE_OBJECTS",
+    "PARSE_REASON_NO_JSON",
+    "PARSE_REASON_NOT_OBJECT",
+    "ParseError",
+    "Perception",
+    "build_action_prompt",
+    "build_tool_action_prompt",
+    "parse_json_action",
+]
 
 
 def _slugify(name: str) -> str:
@@ -38,328 +72,6 @@ async def _hero_exists(world_url: str, hero_id: str) -> bool:
             return r.status_code == 200
     except httpx.HTTPError:
         return False
-
-
-@dataclass
-class Perception:
-    tick_id: int
-    your_state: dict[str, Any]
-    perception: dict[str, Any]
-    deadline_ms: int
-    # World-api-signed cap on max_tokens for any /think call this tick.
-    # The SDK forwards it to the gateway, which enforces.
-    gateway_permission_token: str | None = None
-
-
-@dataclass
-class Decision:
-    """What the hero submits this tick.
-
-    - kind="reflex": deterministic action; no gateway token.
-    - kind="llm":    LLM-driven; `gateway_token` must be set OR (`model`+`messages`)
-                     left for the SDK to fill in via a fallback gateway call.
-    - debug:         optional metadata (e.g. which reflex fired) — surfaced
-                     server-side and rendered in the spectator UI.
-    """
-
-    kind: str
-    action: dict[str, Any]
-    gateway_token: str | None = None
-    messages: list[dict[str, str]] | None = None
-    model: str | None = None
-    debug: dict[str, Any] | None = None
-    # Phase 2 — when the LLM picks a composite tool, the dispatcher expands
-    # its steps into a list of primitive actions. The first one is `action`;
-    # the rest land here for the runtime to push into the composite queue
-    # (one primitive per tick). None means "single primitive tool call".
-    composite_queue_tail: list[dict[str, Any]] | None = None
-
-
-# ---------------------------------------------------------------------------
-# JSON action parser (tolerant of code fences; structured failure reporting)
-# ---------------------------------------------------------------------------
-
-_OBJECT_RE = re.compile(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", re.DOTALL)
-
-# Failure-mode taxonomy. Stable strings — they end up in events that the
-# spectator UI will eventually render, and players will read them looking
-# for "why is my hero waiting?". Don't reword these casually.
-PARSE_REASON_EMPTY = "empty"
-PARSE_REASON_NO_JSON = "no_json_found"
-PARSE_REASON_INVALID_JSON = "invalid_json"
-PARSE_REASON_NOT_OBJECT = "not_an_object"
-PARSE_REASON_MISSING_DO = "missing_do"
-PARSE_REASON_MULTIPLE_OBJECTS = "multiple_objects"
-
-
-class ParseError(ValueError):
-    """A structured LLM-output parse failure.
-
-    Subclasses ValueError so existing `except ValueError` blocks still
-    catch it, but carries the failure reason and a truncated raw output
-    so callers can build a ParseFailure event the spectator can read.
-    """
-
-    def __init__(self, reason: str, *, raw_output: str = "", message: str | None = None) -> None:
-        self.reason = reason
-        self.raw_output = (raw_output or "")[:500]
-        super().__init__(message or f"{reason}: {self.raw_output[:120]!r}")
-
-
-def parse_json_action(text: str) -> dict[str, Any]:
-    """Parse the LLM's completion into an action dict, raising ParseError
-    with a stable `reason` so the world can record what went wrong rather
-    than silently waiting."""
-    raw = text or ""
-    if not raw or not raw.strip():
-        raise ParseError(PARSE_REASON_EMPTY, raw_output=raw)
-    text = raw.strip()
-    # Strip a leading/trailing code fence if present.
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    # Try a whole-string parse first — the strict path. If the model
-    # behaved, this is where the parse succeeds.
-    obj: Any
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError:
-        # Fall back to first-object regex extraction; flag if there are
-        # multiple top-level JSON objects so a second-action smuggle is
-        # legible rather than silent.
-        matches = _OBJECT_RE.findall(text)
-        if not matches:
-            raise ParseError(PARSE_REASON_NO_JSON, raw_output=raw) from None
-        if len(matches) > 1:
-            raise ParseError(
-                PARSE_REASON_MULTIPLE_OBJECTS, raw_output=raw,
-                message=f"{len(matches)} JSON objects in output; refusing to guess",
-            ) from None
-        try:
-            obj = json.loads(matches[0])
-        except json.JSONDecodeError as exc:
-            raise ParseError(PARSE_REASON_INVALID_JSON, raw_output=raw) from exc
-
-    if not isinstance(obj, dict):
-        raise ParseError(
-            PARSE_REASON_NOT_OBJECT, raw_output=raw,
-            message=f"expected object, got {type(obj).__name__}",
-        )
-    if "do" not in obj:
-        raise ParseError(
-            PARSE_REASON_MISSING_DO, raw_output=raw,
-            message=f"missing 'do' field in {obj!r}",
-        )
-    return obj
-
-
-# ---------------------------------------------------------------------------
-# Action-prompt builder
-# ---------------------------------------------------------------------------
-
-_ACTIONS_HELP = """ACTIONS — output EXACTLY ONE as a single-line JSON object. No prose, no fences.
-
-attack — Strike a hostile mob in melee. USE THIS whenever a hostile is at
-  manhattan distance ≤ 1 (look for entries in visible_npcs where
-  hostility == "hostile" and the pos differs from yours by at most 1 in either
-  axis). Hostile mobs WILL hit you back every tick you don't kill them, so
-  attacking is almost always better than waiting or moving when an enemy is in
-  melee range. Picks the slug from visible_npcs.
-    {"do":"attack","target":"<hostile_npc_slug>"}
-
-move — Walk to a tile in your CURRENT zone (within zone size). Use when
-  you need to close distance on a target who is visible but not adjacent.
-  Do NOT move if an enemy is already adjacent — attack instead. Do NOT use
-  to leave the zone (use travel for that).
-    {"do":"move","target":[x,y]}
-
-travel — Walk to an ADJACENT zone (must be in zone_info.connections). Use
-  when the entity you need is in another zone and your current zone has it
-  in its connections list. Cheaper than wandering.
-    {"do":"travel","zone":"<adjacent_zone_slug>"}
-
-say — Speak aloud. Adjacent NPCs (manhattan ≤ 1) hear you and may react
-  based on keywords in your message. Use to greet NPCs, accept/decline
-  quests, ask questions. Keep messages short and direct.
-    {"do":"say","message":"Hello, Marek."}
-
-give — Hand an item from your inventory to an adjacent NPC. Use to deliver
-  quest items. The NPC must be at manhattan distance ≤ 1 and the item must
-  be in your inventory list.
-    {"do":"give","target":"<npc_slug>","item":"<item_slug>"}
-
-defend — +5 AC for the rest of this tick. Use when you expect to be hit
-  but can't yet attack back (e.g. multiple enemies adjacent, low HP).
-    {"do":"defend"}
-
-flee — Step away from the nearest hostile. Use when HP is critically low
-  and you cannot win the next exchange.
-    {"do":"flee"}
-
-examine — Inspect an NPC or item to learn details. Cheap intel; use sparingly.
-    {"do":"examine","target":"<slug>"}
-
-pickup — Grab an item on your current tile (must be in visible_items at
-  your pos with no owner).
-    {"do":"pickup","slug":"<item_slug>"}
-
-drop — Drop an item from inventory at your current tile.
-    {"do":"drop","slug":"<item_slug>"}
-
-look — Refresh perception (rarely needed; perception arrives every tick).
-    {"do":"look"}
-
-wait — Skip the tick. Only when nothing else applies.
-    {"do":"wait"}
-
-DECISION RULES (apply in this order each tick):
-  1. If your HP is ≤ 8: {"do":"flee"}
-  2. If a hostile is in melee range (manhattan ≤ 1 from you): ATTACK it. Do not move.
-  3. If a hostile is visible but not adjacent: move toward its pos.
-  4. If you're adjacent to a quest NPC and have something to say: say it.
-  5. If you're adjacent to a quest NPC and you should hand something over: give.
-  6. If the entity you need is in another zone (check zone_info.connections): travel.
-  7. Otherwise: move toward your goal or wait.
-
-EXAMPLES:
-  Hostile rat at [3,3], you at [3,3] (same tile, manhattan 0):
-    {"do":"attack","target":"rat_a"}
-  Hostile rat at [5,4], you at [5,3] (adjacent, manhattan 1):
-    {"do":"attack","target":"rat_a"}
-  Hostile rat at [5,5], you at [3,3] (visible, not adjacent):
-    {"do":"move","target":[5,5]}
-  Marek visible at [4,4], you at [4,3], marek_state fresh:
-    {"do":"say","message":"Hello, Marek."}
-  Carrying mareks_sealed_package, ghada at [4,4], you at [4,4]:
-    {"do":"give","target":"ghada","item":"mareks_sealed_package"}"""
-
-
-def build_tool_action_prompt(
-    *,
-    name: str,
-    bio: str,
-    goal: str,
-    perception: Perception,
-    system_summary: str = "",
-) -> tuple[str, str]:
-    """Prompt for tool-calling mode. The tool list itself documents the verbs
-    (rich docstrings on each function), so the system prompt is intentionally
-    short — identity, goal, and a directive to call exactly one tool.
-
-    `system_summary` is durable, manifest-declared persona context (e.g. "I
-    hate the Embered. I owe Marek 30g.") that survives across ticks, model
-    swaps, and crashes — it's hero-shaped state the player baked into the
-    YAML, not transient perception."""
-    system = (
-        f"You are {name}. {bio}\n\n"
-        f"Goal: {goal}\n\n"
-        + (f"What you carry with you, always:\n{system_summary}\n\n" if system_summary else "")
-        + "Each tick you must call EXACTLY ONE tool. Read the situation in the "
-        "user message carefully — especially `you.pos`, `visible_npcs`, "
-        "`zone_info.connections`, `inventory`, `memory`, and "
-        "`journal_relevant` (memories pulled from your past that matter "
-        "right now) — and pick the single most appropriate action.\n\n"
-        "Critical rules:\n"
-        "  • If a hostile NPC is at manhattan distance ≤ 1 from you: call attack.\n"
-        "  • If your HP is ≤ 8: call flee.\n"
-        "  • If you need to be in another zone: call travel (only to a zone in connections).\n"
-        "  • If a quest NPC is adjacent and the dialogue should advance: call say.\n"
-    )
-
-    s = perception.your_state
-    v = perception.perception
-    you_pos = s.get("pos") or [0, 0]
-
-    def _annotate(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Attach a precomputed manhattan distance + a human-readable
-        in_melee_range flag. Saves the model from doing arithmetic, which
-        small models reliably get wrong."""
-        out = []
-        for e in entities or []:
-            ep = e.get("pos") or [0, 0]
-            dist = abs(ep[0] - you_pos[0]) + abs(ep[1] - you_pos[1])
-            out.append({**e, "manhattan_to_you": dist, "in_melee_range": dist <= 1})
-        return out
-
-    user = json.dumps(
-        {
-            "tick_id": perception.tick_id,
-            "you": {
-                "name": s.get("name"),
-                "hp": s.get("hp"),
-                "zone": s.get("zone"),
-                "pos": you_pos,
-            },
-            "zone_info": v.get("zone"),
-            "visible_npcs": _annotate(v.get("visible_npcs", [])),
-            "visible_items": _annotate(v.get("visible_items", [])),
-            "visible_heroes": _annotate(v.get("visible_heroes", [])),
-            "inventory": v.get("inventory", []),
-            "memory": v.get("memory", {}),
-            "journal_relevant": v.get("journal_relevant", []),
-            "recent_events": [
-                {"kind": e.get("kind"), "payload": e.get("payload")}
-                for e in (v.get("recent_events", []) or [])[:6]
-            ],
-        },
-        ensure_ascii=False,
-    )
-    return system, user + (
-        "\n\nCall ONE tool now. If any visible_npcs entry has "
-        "in_melee_range == true AND hostility == \"hostile\", you MUST attack "
-        "that one (use its slug as target)."
-    )
-
-
-def build_action_prompt(
-    *,
-    name: str,
-    bio: str,
-    goal: str,
-    perception: Perception,
-) -> tuple[str, str]:
-    system = f"""You are {name}. {bio}
-
-You play a hero in a turn-based fantasy MMO. Each tick you choose ONE action.
-Goal: {goal}
-
-{_ACTIONS_HELP}"""
-
-    s = perception.your_state
-    v = perception.perception
-    user = json.dumps(
-        {
-            "tick_id": perception.tick_id,
-            "you": {
-                "name": s.get("name"),
-                "hp": s.get("hp"),
-                "zone": s.get("zone"),
-                "pos": s.get("pos"),
-            },
-            "zone_info": v.get("zone"),
-            "visible_npcs": v.get("visible_npcs", []),
-            "visible_items": v.get("visible_items", []),
-            "visible_heroes": v.get("visible_heroes", []),
-            "inventory": v.get("inventory", []),
-            "memory": v.get("memory", {}),
-            "recent_events": [
-                {"kind": e.get("kind"), "payload": e.get("payload")}
-                for e in (v.get("recent_events", []) or [])[:8]
-            ],
-        },
-        ensure_ascii=False,
-    )
-    return system, user + "\n\nReturn your one JSON action."
-
-
-# ---------------------------------------------------------------------------
-# Hero
-# ---------------------------------------------------------------------------
 
 
 class Hero:
@@ -659,7 +371,6 @@ class Hero:
 
         tool_calls = body.get("tool_calls") or []
         if not tool_calls:
-            # Some models, given tools, still return free text. Try to parse.
             log.info("LLM returned no tool_calls; trying free-text fallback")
             try:
                 action = parse_json_action(body.get("completion", ""))
@@ -675,9 +386,9 @@ class Hero:
         chosen_name = first.get("name", "")
         chosen_args = first.get("arguments") or {}
 
-        # Composite tool — expand via the dispatcher. First primitive is
-        # this tick's action; the rest land in composite_queue_tail.
-        # Overrides apply when the LLM picks a primitive (handled below).
+        # Composite or override tool — expand via the dispatcher. First
+        # primitive is this tick's action; the rest land in
+        # composite_queue_tail.
         if toolset is not None and (
             toolset.is_composite(chosen_name) or toolset.is_override(chosen_name)
         ):
@@ -689,8 +400,7 @@ class Hero:
                 chosen_name, chosen_args, toolset=toolset, namespace=namespace,
             )
             if not result.actions:
-                log.warning("tool '%s' expanded to nothing — falling back",
-                            chosen_name)
+                log.warning("tool '%s' expanded to nothing — falling back", chosen_name)
                 return Decision(kind="reflex", action=fallback)
             head, *tail = result.actions
             log.info("LLM picked %s: %s(%s) → %d actions",
@@ -724,8 +434,7 @@ class Hero:
                                                  "arguments": chosen_args})[:500]},
             )
 
-        log.info("LLM picked tool: %s(%s) → %s",
-                 chosen_name, chosen_args, action)
+        log.info("LLM picked tool: %s(%s) → %s", chosen_name, chosen_args, action)
         return Decision(kind="llm", action=action, gateway_token=body["gateway_token"])
 
     # ----------------------------------------------------------------- internal
@@ -747,7 +456,6 @@ class Hero:
             if decision.gateway_token:
                 outbound["gateway_token"] = decision.gateway_token
             elif decision.messages and decision.model:
-                # legacy path: SDK calls the gateway, no completion parsing.
                 _, token = await self.think(
                     messages=decision.messages, model=decision.model, tick_id=p.tick_id
                 )
