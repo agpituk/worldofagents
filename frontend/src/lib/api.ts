@@ -262,8 +262,18 @@ export const api = {
     ),
   toolDetail: (heroId: string, toolName: string) =>
     fetchJson<ToolDetail>(`/api/heroes/${heroId}/tools/${toolName}`),
-  tickLlmCall: (heroId: string, tick: number) =>
-    fetchJson<TickLlmCall>(`/api/heroes/${heroId}/ticks/${tick}/llm-call`),
+  tickLlmCall: (heroId: string, tick: number, ownerToken?: string | null) => {
+    const qs = ownerToken ? `?owner_token=${encodeURIComponent(ownerToken)}` : "";
+    return fetchJson<TickLlmCall>(
+      `/api/heroes/${heroId}/ticks/${tick}/llm-call${qs}`,
+    );
+  },
+  latestLlmCall: (heroId: string, ownerToken?: string | null) => {
+    const qs = ownerToken ? `?owner_token=${encodeURIComponent(ownerToken)}` : "";
+    return fetchJson<LatestLlmCall>(
+      `/api/heroes/${heroId}/llm-call/latest${qs}`,
+    );
+  },
   listBounties: (status: "open" | "claimed" | "expired" | "all" = "open") =>
     fetchJson<Bounty[]>(`/bounties?status=${status}`),
   currentEvents: () => fetchJson<CurrentEvents>("/events/current"),
@@ -535,7 +545,17 @@ export type TickLlmCall = {
   tools_offered: Array<{ name: string; description: string }>;
   reasoning_trace: string;
   tool_mentions: string[];
+  // Owner-only fields. Populated only when prompt_visible is true (the
+  // request carried the right ?owner_token).
+  prompt_visible: boolean;
+  prompt_text: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  tokens_budget: number | null;
+  latency_ms: number | null;
 };
+
+export type LatestLlmCall = TickLlmCall & { tick_id: number | null };
 
 
 

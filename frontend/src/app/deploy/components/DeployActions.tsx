@@ -5,9 +5,11 @@ type Props = {
   submitting: boolean;
   error: string | null;
   onDeploy: () => void;
+  disabledReason?: string | null;
 };
 
-export default function DeployActions({ manifest, submitting, error, onDeploy }: Props) {
+export default function DeployActions({ manifest, submitting, error, onDeploy, disabledReason }: Props) {
+  const blocked = !!disabledReason;
   return (
     <>
       {error && (
@@ -19,13 +21,13 @@ export default function DeployActions({ manifest, submitting, error, onDeploy }:
       <div className="flex items-center gap-3">
         <button
           onClick={onDeploy}
-          disabled={submitting || manifest.trim().length === 0}
+          disabled={submitting || manifest.trim().length === 0 || blocked}
           className="border border-amber bg-amber-dim/10 text-amber px-6 py-2 hover:bg-amber-dim/20 disabled:opacity-50"
         >
           {submitting ? "deploying…" : "deploy hero"}
         </button>
         <span className="text-xs text-fg-muted">
-          You'll get a share URL on the next screen.
+          {blocked ? disabledReason : "You'll get a share URL on the next screen."}
         </span>
       </div>
     </>

@@ -56,6 +56,10 @@ class ThinkResponse(BaseModel):
     tokens_out: int
     latency_ms: int
     gateway_token: str
+    # The per-tick token budget the permission claim authorised. Surfaced
+    # so the runner (and downstream inspector) can show usage-vs-budget
+    # without re-decoding the (signed, opaque) permission token.
+    tokens_budget: int | None = None
 
 
 @app.get("/health")
@@ -126,4 +130,5 @@ async def think(req: ThinkRequest) -> ThinkResponse:
         tokens_out=result.tokens_out,
         latency_ms=result.latency_ms,
         gateway_token=token,
+        tokens_budget=permission_max_tokens,
     )

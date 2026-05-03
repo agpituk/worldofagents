@@ -158,6 +158,10 @@ def test_tick_llm_call_returns_tools_offered(app_with_db):
     body = r.json()
     assert body["chosen_tool"] == "safe_gather"
     assert "safe_gather" in body["tool_mentions"]
+    # Public path: no prompt data leaks even when payload contains it.
+    assert body["prompt_visible"] is False
+    assert body["prompt_text"] is None
+    assert body["tokens_in"] is None
 
 
 def test_tick_llm_call_404_when_no_event(app_with_db):
@@ -165,3 +169,71 @@ def test_tick_llm_call_404_when_no_event(app_with_db):
     client = TestClient(app)
     r = client.get(f"/api/heroes/{hid}/ticks/9999/llm-call")
     assert r.status_code == 404
+
+
+def test_tick_llm_call_owner_token_unlocks_prompt(app_with_db):
+    app, db, hid = app_with_db
+    _add_resolved(db, hid, 400, [
+        {"event": "llm.tools_offered", "payload": {
+            "chosen_tool": "safe_gather",
+            "chosen_args": {},
+            "tools_offered": [{"name": "safe_gather", "description": "x"}],
+            "reasoning_trace": "...",
+            "prompt_text": "# system\nyou are t\n\n# user\nperception here",
+            "tokens_in": 120, "tokens_out": 30,
+            "tokens_budget": 500, "latency_ms": 412,
+        }},
+    ])
+    client = TestClient(app)
+    auth = f"t-{hid}"
+
+    # Wrong token → still public-only.
+    r = client.get(f"/api/heroes/{hid}/ticks/400/llm-call?owner_token=wrong")
+    assert r.status_code == 200
+    assert r.json()["prompt_visible"] is False
+    assert r.json()["prompt_text"] is None
+
+    # Right token → owner sees prompt + tokens + latency.
+    r = client.get(f"/api/heroes/{hid}/ticks/400/llm-call?owner_token={auth}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["prompt_visible"] is True
+    assert "you are t" in body["prompt_text"]
+    assert body["tokens_in"] == 120
+    assert body["tokens_out"] == 30
+    assert body["tokens_budget"] == 500
+    assert body["latency_ms"] == 412
+
+
+def test_latest_llm_call_returns_most_recent_event(app_with_db):
+    app, db, hid = app_with_db
+    # An older reflex-only tick (no llm event).
+    _add_resolved(db, hid, 500, [
+        {"event": "tool.expanded", "payload": {"tool": "safe_gather"}},
+    ])
+    # A more recent llm tick.
+    _add_resolved(db, hid, 510, [
+        {"event": "llm.tools_offered", "payload": {
+            "chosen_tool": "safe_gather", "chosen_args": {},
+            "tools_offered": [{"name": "safe_gather", "description": "x"}],
+            "reasoning_trace": "...",
+            "prompt_text": "P", "tokens_in": 5, "tokens_out": 5,
+            "tokens_budget": 500, "latency_ms": 100,
+        }},
+    ])
+    client = TestClient(app)
+    auth = f"t-{hid}"
+    r = client.get(f"/api/heroes/{hid}/llm-call/latest?owner_token={auth}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tick_id"] == 510
+    assert body["prompt_visible"] is True
+    assert body["prompt_text"] == "P"
+
+
+def test_latest_llm_call_returns_null_when_none(app_with_db):
+    app, db, hid = app_with_db
+    client = TestClient(app)
+    r = client.get(f"/api/heroes/{hid}/llm-call/latest")
+    assert r.status_code == 200
+    assert r.json()["tick_id"] is None

@@ -42,7 +42,25 @@ class ManagedHeroTask:
         from arena_bot.tool_dispatch import HeroToolset
 
         inner = manifest.get("hero") if isinstance(manifest.get("hero"), dict) else manifest
-        self._inner = inner or {}
+        inner = dict(inner or {})
+        # The DB-stored manifest is HeroManifest.model_dump output, which
+        # tucks reflexes/abilities/tools/memory/models/system under
+        # `extras`. The bot SDK's reflex/ability/persona helpers expect
+        # those keys at the top of the hero dict (the YAML-on-disk shape).
+        # Merge them up here so managed heroes drive the same code paths
+        # as remote bots, without leaking the schema flattening into the
+        # SDK.
+        merged_extras = inner.pop("extras", None)
+        if isinstance(merged_extras, dict):
+            for k, v in merged_extras.items():
+                if k not in inner:
+                    inner[k] = v
+        self._inner = inner
+
+        # Persona/ability parsers in the bot SDK look at `manifest["hero"]`
+        # first, then fall back to top-level. Re-build a YAML-shaped dict
+        # so they find reflexes/abilities under hero.* like a remote bot.
+        manifest = {**manifest, "hero": self._inner}
 
         persona = parse_persona(manifest)
         self._bio = persona["bio"]
@@ -203,11 +221,43 @@ class ManagedHeroTask:
             return {"do": "wait"}
 
         tool_calls = body.get("tool_calls") or []
-        if tool_calls:
-            first = tool_calls[0]
-            chosen_name = first.get("name", "")
-            chosen_args = first.get("arguments") or {}
+        chosen_name = tool_calls[0].get("name", "") if tool_calls else ""
+        chosen_args = (tool_calls[0].get("arguments") or {}) if tool_calls else {}
 
+        # Stash one llm.tools_offered event per LLM call regardless of
+        # whether the model picked a composite, an override, or a
+        # primitive verb. The prompt inspector reads this back; without
+        # it the panel is empty for the common case (model picks a
+        # primitive like `attack` or `move`).
+        trace_buf = getattr(self, "_tick_trace", None)
+        if trace_buf is not None:
+            prompt_text = f"# system\n{system}\n\n# user\n{user}"
+            trace_buf.append({
+                "event": "llm.tools_offered",
+                "payload": {
+                    "chosen_tool": chosen_name or None,
+                    "chosen_args": chosen_args,
+                    "tools_offered": [
+                        {
+                            "name": s["function"]["name"],
+                            "description": s["function"]["description"][:240],
+                        }
+                        for s in specs
+                    ],
+                    "reasoning_trace": (body.get("completion") or "")[:500],
+                    "prompt_text": prompt_text,
+                    "tokens_in": int(body.get("tokens_in") or 0),
+                    "tokens_out": int(body.get("tokens_out") or 0),
+                    "tokens_budget": (
+                        int(body["tokens_budget"])
+                        if body.get("tokens_budget") is not None
+                        else None
+                    ),
+                    "latency_ms": int(body.get("latency_ms") or 0),
+                },
+            })
+
+        if tool_calls:
             # Composite or override — expand and queue the tail through
             # the same composite_queue mechanism abilities use.
             if (
@@ -215,30 +265,10 @@ class ManagedHeroTask:
                 or self._toolset.is_override(chosen_name)
             ):
                 namespace = build_context(perception)
-                trace_buf = getattr(self, "_tick_trace", None)
 
                 def _trace(event: str, payload: dict[str, Any]) -> None:
                     if trace_buf is not None:
                         trace_buf.append({"event": event, "payload": payload})
-
-                # Stash the LLM-facing tool list and reasoning so the
-                # Inspector's "why didn't my tool fire?" view has data.
-                if trace_buf is not None:
-                    trace_buf.append({
-                        "event": "llm.tools_offered",
-                        "payload": {
-                            "chosen_tool": chosen_name,
-                            "chosen_args": chosen_args,
-                            "tools_offered": [
-                                {
-                                    "name": s["function"]["name"],
-                                    "description": s["function"]["description"][:240],
-                                }
-                                for s in specs
-                            ],
-                            "reasoning_trace": (body.get("completion") or "")[:500],
-                        },
-                    })
 
                 result = expand_tool_call(
                     chosen_name, chosen_args,

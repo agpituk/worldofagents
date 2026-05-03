@@ -11,6 +11,7 @@ import dynamic from "next/dynamic";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { rememberOwnedHero } from "@/lib/heroOwnership";
 import DeployIntro from "./components/DeployIntro";
 import ValidationPanel from "./components/ValidationPanel";
 import SimulationPanel from "./components/SimulationPanel";
@@ -19,6 +20,11 @@ import ManagedToggle from "./components/ManagedToggle";
 import DeployActions from "./components/DeployActions";
 import PostDeploySuccess, { type RegisteredHero } from "./components/PostDeploySuccess";
 import { STARTER_MANIFEST, manifestYamlFromHero } from "./components/manifestTemplates";
+import BuildPanel, { parseBuild } from "./components/BuildPanel";
+import TemplateModal from "./components/TemplateModal";
+import type { Archetype } from "./templates/templates";
+
+const ONBOARDED_KEY = "worldofagents:onboarded";
 
 // Blockly is heavy (~280KB gzipped) — lazy-load only on /deploy.
 const BlockEditor = dynamic(() => import("@/components/BlockEditor"), {
@@ -35,9 +41,40 @@ function DeployFormBody() {
   const forkId = params.get("fork");
   const [manifest, setManifest] = useState(STARTER_MANIFEST);
   const [forkSource, setForkSource] = useState<string | null>(null);
+  const [templateName, setTemplateName] = useState<string | null>(null);
+  const [showTemplateModal, setShowTemplateModal] = useState(false);
   const [managed, setManaged] = useState(true); // default ON — paste-and-go
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // First-visit gate. Only show the picker when the user has neither forked
+  // nor onboarded before. The flag is set as soon as a card is clicked OR
+  // the modal is dismissed, so we don't nag.
+  useEffect(() => {
+    if (forkId) return;
+    try {
+      const seen = window.localStorage.getItem(ONBOARDED_KEY);
+      if (!seen) setShowTemplateModal(true);
+    } catch {
+      // localStorage may be unavailable (private mode); fail open — no modal.
+    }
+  }, [forkId]);
+
+  function pickTemplate(a: Archetype) {
+    setManifest(a.yaml);
+    setTemplateName(a.name);
+    setShowTemplateModal(false);
+    try {
+      window.localStorage.setItem(ONBOARDED_KEY, "1");
+    } catch {}
+  }
+
+  function dismissTemplateModal() {
+    setShowTemplateModal(false);
+    try {
+      window.localStorage.setItem(ONBOARDED_KEY, "1");
+    } catch {}
+  }
 
   // Phase 8 — load the source hero's public manifest and prefill the
   // textarea when /deploy?fork=<id> is opened. Failure is silent so a
@@ -78,6 +115,7 @@ function DeployFormBody() {
     setSubmitting(true);
     try {
       const r = await api.registerHero(manifest, { managed });
+      rememberOwnedHero(r.id, r.auth_token);
       setRegistered({ ...r, managed });
     } catch (e: any) {
       setError(String(e?.message ?? "registration failed"));
@@ -100,6 +138,7 @@ function DeployFormBody() {
         onDeployAnother={() => {
           setRegistered(null);
           setManifest(STARTER_MANIFEST);
+          setTemplateName(null);
         }}
       />
     );
@@ -107,12 +146,38 @@ function DeployFormBody() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
+      <TemplateModal
+        open={showTemplateModal}
+        onPick={pickTemplate}
+        onSkip={dismissTemplateModal}
+      />
+
       <Link href="/" className="text-xs text-fg-muted hover:text-amber-dim">← world</Link>
 
       <DeployIntro
         forkSource={forkSource}
         onUpload={onFile}
-        onReset={() => setManifest(STARTER_MANIFEST)}
+        onReset={() => {
+          setManifest(STARTER_MANIFEST);
+          setTemplateName(null);
+        }}
+      />
+
+      {templateName && (
+        <div className="text-xs text-fg-muted flex items-center gap-2">
+          <span className="border border-amber-dim/40 text-amber-dim px-2 py-0.5">
+            Template: {templateName}
+          </span>
+          <span>— edit freely. Replace the <code>@template</code> author with your handle.</span>
+        </div>
+      )}
+
+      <BuildPanel
+        value={manifest}
+        onChange={(next) => {
+          setManifest(next);
+          setValidation(null);
+        }}
       />
 
       <BlockEditor
@@ -146,6 +211,13 @@ function DeployFormBody() {
         submitting={submitting}
         error={error}
         onDeploy={deploy}
+        disabledReason={(() => {
+          const b = parseBuild(manifest);
+          if (!b) return null;
+          const total = b.str + b.dex + b.con + b.int + b.wis + b.cha;
+          if (total > 100) return `over budget by ${total - 100} — server will reject`;
+          return null;
+        })()}
       />
     </div>
   );
