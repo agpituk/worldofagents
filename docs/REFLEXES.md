@@ -80,14 +80,22 @@ perception* — anything else is rejected.
 **Allowed:**
 - Boolean ops (`and`, `or`, `not`)
 - Comparisons (`==`, `<`, `<=`, `in`, `not in`, …)
-- Arithmetic and power (`+ - * / // % **`)
-- Indexing and attribute access (`equipped['weapon']`, `_perception.my_statuses`)
+- Arithmetic (`+ - * / // %`)
+- Indexing and attribute access on non-underscore names
+  (`equipped['weapon']`, `_perception.my_statuses`)
 - Function calls to the helpers above and to the bindings table
 - Literals: numbers, strings, lists, tuples, dicts, sets, conditional expressions
 
 **Rejected** (the parser hard-fails the reflex, the runtime logs and
 falls through):
-- `import`, `__class__`, `__import__`, dunder access generally
+- `import`, `__import__`
+- Power operator `**` — `2 ** (10 ** 9)` would freeze the tick loop on
+  bigint allocation; no current grammar needs exponentiation. (Bindings
+  named `_perception` are still readable; the rule is on the *attribute*,
+  not the binding name.)
+- Any attribute whose name starts with `_` (rules out `__class__`,
+  `__bases__`, `_private`, etc. — the `().__class__.__bases__[0].__subclasses__()`
+  escape family).
 - Comprehensions (`[x for x in …]`), generator expressions
 - `lambda`, `def`, assignments, `:=` (walrus)
 - `yield`, `await`, `try`, `with`

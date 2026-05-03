@@ -1,6 +1,11 @@
 # Implementation Plan — Agent Tools Feature Group
 
-**Status**: Active. Drives delivery of all 7 phases on `feature/agent-tools`.
+**Status**: Complete (delivered). All seven phases shipped on
+`feature/agent-tools` and merged to `main`; the gap-closure pass in §9
+landed too. See §8 "Delivery log" for the per-phase result. Retained as
+design context — `OVERVIEW.md`, `GRAMMAR.md`, `BACKEND.md`,
+`BLOCK_EDITOR.md`, `INSPECTOR.md`, and `SHOWCASE.md` remain authoritative
+for the running system.
 
 This plan is the bridge between the spec set (`OVERVIEW.md`, `GRAMMAR.md`,
 `BACKEND.md`, `BLOCK_EDITOR.md`, `INSPECTOR.md`, `SHOWCASE.md`,

@@ -219,6 +219,11 @@ GET  /api/tools/{tool_id}/recent_calls             # samples across all heroes
 GET  /api/tools/gallery?category=combat            # gallery feed
 GET  /api/compare?heroes=a,b,c                     # comparison payload
 POST /api/tools/{tool_id}/copy                     # records a copy event
+                                                   # ⚠ requires `X-Owner-Token`
+                                                   # of the target hero
+                                                   # (`by_hero` in body) — the
+                                                   # endpoint mutates that
+                                                   # hero's manifest.
 ```
 
 ### 7.2 Tables (suggested schema)

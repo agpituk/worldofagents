@@ -1,5 +1,11 @@
 # Agent-Builder UX Plan — Lowering the On-Ramp, Closing the Diagnostic Loop
 
+> **Status: Shipped.** All three items landed in commit `773e8db`
+> (`agent-builder UX: stat widget, template picker, prompt inspector`),
+> merged via PR #8. This document is retained as design context — the
+> Symptom/Evidence/Fix/Done-when entries record the reasoning behind
+> each surface that is now live.
+
 This plan covers three UX changes to `/deploy` and `/heroes/[id]` that
 together turn the project from a "playground for agent-engineering
 intuition" into something closer to a structured classroom for thinking

@@ -1,5 +1,14 @@
 # Fix Plan — Closing the Gap Between DESIGN.md and the Code
 
+> **Historical document.** The 16-commit branch this plan drove has
+> landed; remaining work moved to `REMAINING_WORK.md`. Commit `006b2dd`
+> (arch-review cleanup) split `world-api/app/core/actions.py` into
+> `world-api/app/core/actions/{combat,contracts,dispatcher,equipment,
+> gathering,inventory,magic,movement,perception,quests,sandbox,social,
+> statuses,titles,trade}.py` plus `_helpers.py` and `_result.py`. Line
+> numbers below (`actions.py:NNNN`) are frozen against the pre-split
+> monolith — grep by symbol when chasing references.
+
 This plan is the output of a code-level review of the prototype. It is not
 a roadmap of new features; it is a list of places where the implementation
 does not currently honour what `DESIGN.md` and `README.md` promise, plus
