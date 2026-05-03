@@ -20,3 +20,35 @@ a { color: #f0a800; text-decoration: none; }
 a:hover { color: #ffc740; text-shadow: 0 0 8px rgba(240, 168, 0, 0.4); }
 
 h1, h2, h3 { font-family: ui-serif, Georgia, serif; letter-spacing: 0.02em; }
+
+/* Blockly toolbox — default theme renders category labels in near-black,
+   which is invisible against our dark UI until a row is selected. Force
+   a readable foreground and a bit of padding for the tree rows. */
+.blocklyToolboxDiv {
+  background: #15140f !important;
+  border-right: 1px solid #2a2620;
+  padding: 8px 0;
+}
+.blocklyTreeRow {
+  padding: 6px 12px !important;
+  margin: 1px 4px;
+  border-radius: 3px;
+}
+.blocklyTreeLabel {
+  color: #e8e0cf !important;
+  font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace !important;
+  font-size: 13px !important;
+}
+.blocklyTreeRow:hover {
+  background: #211e18 !important;
+}
+.blocklyTreeSelected {
+  background: #2c2820 !important;
+}
+.blocklyTreeSelected .blocklyTreeLabel {
+  color: #ffc740 !important;
+}
+.blocklyFlyoutBackground {
+  fill: #1a1812 !important;
+  fill-opacity: 1 !important;
+}

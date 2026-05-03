@@ -79,7 +79,7 @@ services:
       - |
         # Install the bot SDK so the managed runtime can use the same
         # reflex/prompt code paths as remote bots. Editable install so
-        # `make dev` reflects changes after a restart.
+        # `make start` reflects changes after a restart.
         echo "[managed] installing arena-bot SDK from /sdk/bot-sdk-python"
         uv pip install --python /app/.venv/bin/python --quiet -e /sdk/bot-sdk-python \
           && echo "[managed] arena-bot installed" \

@@ -4,3 +4,9 @@ out
 .env*.local
 *.log
 tsconfig.tsbuildinfo
+
+# Editor assets vendored from node_modules at predev/prebuild time
+# (see scripts/copy-editor-assets.mjs). Kept out of git so they
+# don't drift from the package version in package.json.
+public/monaco
+public/blockly

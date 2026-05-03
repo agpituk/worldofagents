@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.domains.manifest_validate.clamp_table import CLAMP_TABLE, is_clampable
-from app.domains.manifest_validate.shared import META_VERBS
+from app.domains.manifest_validate.shared import META_VERBS, SDK_CONVENIENCE_VERBS
 
 # Importing the SDK module so server + SDK use the same parser. The
 # bot-sdk-python package is on PYTHONPATH inside this monorepo.
@@ -303,7 +303,11 @@ def _check_step_verb(
             f"step references itself ('{self_name}') — would loop",
             path=path,
         ))
-    elif verb not in valid_verbs and verb not in composite_names:
+    elif (
+        verb not in valid_verbs
+        and verb not in composite_names
+        and verb not in SDK_CONVENIENCE_VERBS
+    ):
         out.append(_issue(
             "error",
             f"unknown verb '{verb}' (not a primitive nor a composite in this manifest)",

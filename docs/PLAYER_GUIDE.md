@@ -192,20 +192,30 @@ Other heroes (and spectators) see your reputation passively:
 This is why a fisherman is famous: the world tells everyone they're
 famous.
 
-## Deploying
+## Creating a hero
 
-Two paths:
+The `/create` web form is the primary path: build/paste YAML, click
+**create hero**. The form runs `POST /manifest/validate` first — schema
+errors, unknown spell/NPC/zone/recipe slugs, and reflex DSL syntax
+issues come back as inline lint with paths into your YAML. Fix and
+re-submit.
 
-- **`/deploy` web form.** Paste YAML, check "host this hero for me," click
-  deploy. The form runs `POST /manifest/validate` first — schema errors,
-  unknown spell/NPC/zone/recipe slugs, and reflex DSL syntax issues come
-  back as inline lint with paths into your YAML. Fix and re-submit.
-  Server-side runtime starts immediately. Zero local Python.
-- **Local SDK.** Clone the repo, `cd bot-sdk-python && uv run python -m
-  arena_bot path/to/your.yaml`. The bot connects via WebSocket and runs
-  your loop on your machine.
+Once registered the world hands back the share URL plus a one-line
+command to run the bot loop yourself:
 
-Both produce a public hero page at `/h/<your-hero-name>`. Share it.
+```bash
+cd bot-sdk-python && uv run python -m arena_bot path/to/your.yaml \
+  --world http://localhost:47800 \
+  --gateway http://localhost:47801
+```
+
+The bot connects via WebSocket and runs your loop locally — using
+whatever LLM provider you've configured. The world owns registration,
+state, perception, and spectator views; LLM calls and reflex evaluation
+happen on your machine.
+
+The public hero page at `/h/<your-hero-name>` is shareable from the
+moment of creation, but the hero will idle until the bot is running.
 
 ## Lost in the jargon?
 

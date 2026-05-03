@@ -1,8 +1,8 @@
-.PHONY: help dev down logs migrate revision shell-world shell-gateway test test-cov test-cov-sdk test-cov-gateway test-cov-all
+.PHONY: help start stop logs migrate revision shell-world shell-gateway test test-cov test-cov-sdk test-cov-gateway test-cov-all
 
 help:
-	@echo "make dev          - bring up all services"
-	@echo "make down         - stop all services"
+	@echo "make start        - bring up all services"
+	@echo "make stop         - stop all services"
 	@echo "make logs         - tail logs from all services"
 	@echo "make migrate      - run alembic migrations on world-api"
 	@echo "make revision m='message' - create a new alembic revision"
@@ -14,10 +14,10 @@ help:
 	@echo "make test-cov-gateway - run llm-gateway pytest with coverage"
 	@echo "make test-cov-all - run coverage across all Python services"
 
-dev:
+start:
 	docker compose up -d --build
 
-down:
+stop:
 	docker compose down
 
 logs:

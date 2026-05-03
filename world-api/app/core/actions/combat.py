@@ -341,9 +341,14 @@ def _resolve_attack_hero(db: Session, hero: Hero, action: dict[str, Any]) -> Res
 
     zone = db.get(Zone, hero.zone)
     if zone is None or zone.kind in _SANCTUARY_KINDS:
+        zone_kind = zone.kind if zone else "unknown"
         return ResolutionResult(
             False,
-            {"verb": "attack_hero", "error": "PvP forbidden in sanctuary", "zone_kind": zone.kind if zone else None},
+            {
+                "verb": "attack_hero",
+                "error": f"PvP forbidden in this zone (kind={zone_kind})",
+                "zone_kind": zone_kind,
+            },
         )
 
     target = db.scalar(select(Hero).where(Hero.name == str(target_name)))

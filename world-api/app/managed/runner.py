@@ -211,6 +211,35 @@ class ManagedHeroTask:
         }
         if perception.gateway_permission_token:
             payload["permission_token"] = perception.gateway_permission_token
+
+        # Build the inspector trace event up front so we record what we
+        # ATTEMPTED even if the gateway / upstream provider call fails.
+        # Previously we only appended on success, so a downed llamafile
+        # left the inspector showing "0 tools" with no error context.
+        trace_buf = getattr(self, "_tick_trace", None)
+        prompt_text = f"# system\n{system}\n\n# user\n{user}"
+        offered_event: dict[str, Any] = {
+            "event": "llm.tools_offered",
+            "payload": {
+                "chosen_tool": None,
+                "chosen_args": {},
+                "tools_offered": [
+                    {
+                        "name": s["function"]["name"],
+                        "description": s["function"]["description"][:240],
+                    }
+                    for s in specs
+                ],
+                "reasoning_trace": "",
+                "prompt_text": prompt_text,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "tokens_budget": None,
+                "latency_ms": 0,
+                "error": None,
+            },
+        }
+
         try:
             async with httpx.AsyncClient(base_url=_gateway_base_url(), timeout=60.0) as client:
                 r = await client.post("/think", json=payload)
@@ -218,44 +247,34 @@ class ManagedHeroTask:
                 body = r.json()
         except httpx.HTTPError as exc:
             log.warning("gateway call failed for %s: %s — falling back to wait", self.name, exc)
+            if trace_buf is not None:
+                offered_event["payload"]["error"] = (
+                    f"{type(exc).__name__}: {exc}"[:500]
+                )
+                trace_buf.append(offered_event)
             return {"do": "wait"}
 
         tool_calls = body.get("tool_calls") or []
         chosen_name = tool_calls[0].get("name", "") if tool_calls else ""
         chosen_args = (tool_calls[0].get("arguments") or {}) if tool_calls else {}
 
-        # Stash one llm.tools_offered event per LLM call regardless of
-        # whether the model picked a composite, an override, or a
-        # primitive verb. The prompt inspector reads this back; without
-        # it the panel is empty for the common case (model picks a
-        # primitive like `attack` or `move`).
-        trace_buf = getattr(self, "_tick_trace", None)
+        # Fill in the response-derived fields and emit the trace event.
+        # This is the success path — the inspector always sees one
+        # `llm.tools_offered` per attempt, success or failure.
         if trace_buf is not None:
-            prompt_text = f"# system\n{system}\n\n# user\n{user}"
-            trace_buf.append({
-                "event": "llm.tools_offered",
-                "payload": {
-                    "chosen_tool": chosen_name or None,
-                    "chosen_args": chosen_args,
-                    "tools_offered": [
-                        {
-                            "name": s["function"]["name"],
-                            "description": s["function"]["description"][:240],
-                        }
-                        for s in specs
-                    ],
-                    "reasoning_trace": (body.get("completion") or "")[:500],
-                    "prompt_text": prompt_text,
-                    "tokens_in": int(body.get("tokens_in") or 0),
-                    "tokens_out": int(body.get("tokens_out") or 0),
-                    "tokens_budget": (
-                        int(body["tokens_budget"])
-                        if body.get("tokens_budget") is not None
-                        else None
-                    ),
-                    "latency_ms": int(body.get("latency_ms") or 0),
-                },
-            })
+            p = offered_event["payload"]
+            p["chosen_tool"] = chosen_name or None
+            p["chosen_args"] = chosen_args
+            p["reasoning_trace"] = (body.get("completion") or "")[:500]
+            p["tokens_in"] = int(body.get("tokens_in") or 0)
+            p["tokens_out"] = int(body.get("tokens_out") or 0)
+            p["tokens_budget"] = (
+                int(body["tokens_budget"])
+                if body.get("tokens_budget") is not None
+                else None
+            )
+            p["latency_ms"] = int(body.get("latency_ms") or 0)
+            trace_buf.append(offered_event)
 
         if tool_calls:
             # Composite or override — expand and queue the tail through

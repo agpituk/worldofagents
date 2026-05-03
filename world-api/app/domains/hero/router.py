@@ -13,6 +13,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -101,6 +102,18 @@ def get_hero(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]):
     if hero is None:
         raise HTTPException(404, "hero not found")
     return HeroOut.from_hero(hero)
+
+
+@router.get("/{hero_id}/manifest.yaml", response_class=PlainTextResponse)
+def get_hero_manifest_yaml(hero_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]):
+    hero = HeroService.get_by_id(db, hero_id)
+    if hero is None:
+        raise HTTPException(404, "hero not found")
+    return PlainTextResponse(
+        HeroService.export_manifest_yaml(hero),
+        media_type="application/x-yaml",
+        headers={"Content-Disposition": f'attachment; filename="{hero.name}.yaml"'},
+    )
 
 
 @router.get("/{hero_id}/memory-trace")

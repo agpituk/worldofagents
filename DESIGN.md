@@ -452,7 +452,7 @@ End-to-end skeleton, no game logic yet. Demonstrates: register hero → bot conn
 - `world-api/` — FastAPI + Postgres + SQLAlchemy + Alembic, hero domain (register, get, list), tick scheduler heartbeat (logs "tick N")
 - `llm-gateway/` — FastAPI service, `POST /think` (cq stub for now), token signing/verification utility
 - `bot-sdk-python/` — `Hero(manifest_path).run()` connects WS, registers, no-op tick handler
-- `docker-compose.yml` — Postgres, Redis, world-api, llm-gateway, `make dev` brings it up
+- `docker-compose.yml` — Postgres, Redis, world-api, llm-gateway, `make start` brings it up
 
 ### v0.1 — first playable (✓ shipped)
 

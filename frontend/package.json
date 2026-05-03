@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-editor-assets.mjs",
     "dev": "next dev -p 3000 -H 0.0.0.0",
+    "prebuild": "node scripts/copy-editor-assets.mjs",
     "build": "next build",
     "start": "next start -p 3000 -H 0.0.0.0",
     "lint": "next lint",
@@ -14,6 +16,7 @@
     "@monaco-editor/react": "^4.7.0",
     "blockly": "^11.2.2",
     "js-yaml": "^4.1.1",
+    "monaco-editor": "0.55.1",
     "next": "15.0.3",
     "react": "19.0.0",
     "react-dom": "19.0.0"

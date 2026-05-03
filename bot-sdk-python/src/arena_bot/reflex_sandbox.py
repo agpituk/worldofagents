@@ -65,9 +65,26 @@ class UnsafeExpression(ValueError):
         super().__init__(msg)
 
 
+_YAML_BOOL_ALIASES = {"true": True, "false": False, "null": None, "none": None}
+
+
+class _BoolAliasTransformer(ast.NodeTransformer):
+    """Rewrite YAML-style identifiers (`true`/`false`/`null`/`none`) to
+    Python constants. Without this, `when: "true"` compiles fine but
+    fails at eval with `NameError`, and the engine silently skips the
+    reflex — turning the catch-all idiom into a no-op."""
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id in _YAML_BOOL_ALIASES:
+            return ast.copy_location(ast.Constant(_YAML_BOOL_ALIASES[node.id]), node)
+        return node
+
+
 def compile_safe(expr: str) -> CodeType:
     """Parse + validate + compile a reflex expression."""
     tree = ast.parse(expr, mode="eval")
+    tree = _BoolAliasTransformer().visit(tree)
+    ast.fix_missing_locations(tree)
     for node in ast.walk(tree):
         if type(node) not in _ALLOWED_NODES:
             raise UnsafeExpression(node, expr)

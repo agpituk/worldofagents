@@ -150,3 +150,40 @@ def test_runaway_helper_calls_disable_only_that_reflex():
     engine = ReflexEngine(specs)
     action, _ = engine.evaluate_with_debug(_make_perception())
     assert action is not None and action.get("do") == "defend"
+
+
+# --- YAML-style aliases (lowercase true/false/null/none) -------------------
+# Templates and STARTER_MANIFEST historically wrote `when: "true"` (lowercase
+# string), which compiled fine but evaluated to NameError under the original
+# sandbox — silently disabling the catch-all reflex. The _BoolAliasTransformer
+# coerces these to Python constants at compile time. Without these tests, the
+# fix could regress without anyone noticing (the failure mode is a quiet skip).
+
+
+@pytest.mark.parametrize("expr,expected", [
+    ("true", True),
+    ("false", False),
+    ("null", None),
+    ("none", None),
+    ("True and hp > 0", True),
+    ("false or hp <= 30", True),
+])
+def test_yaml_bool_aliases(expr, expected):
+    code = compile_safe(expr)
+    assert eval(code, {"__builtins__": {}}, {"hp": 30}) == expected
+
+
+def test_yaml_aliases_unblock_catch_all_reflex():
+    """Regression test: the catch-all `when: "true" -> invoke_llm` idiom
+    must actually fire. Pre-fix, the lowercase identifier raised NameError
+    and the engine quietly skipped the reflex."""
+    from arena_bot.reflexes import ReflexEngine
+
+    engine = ReflexEngine([
+        {"when": "false", "then": {"do": "wait"}},
+        {"when": "true", "then": {"do": "invoke_llm"}},
+    ])
+    action, debug = engine.evaluate_with_debug(_make_perception())
+    assert action == {"do": "invoke_llm"}
+    assert debug["reflex_index"] == 1
+
