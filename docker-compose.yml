@@ -53,6 +53,9 @@ services:
       - ./world-api/app:/app/app
       - ./world-api/alembic:/app/alembic
       - ./world-api/alembic.ini:/app/alembic.ini
+      # Tests aren't COPYed into the production image (correct hygiene), but
+      # `make test` runs pytest inside the container and needs them. Mount in dev.
+      - ./world-api/tests:/app/tests
       # Bot SDK is bind-mounted (not :ro because pip install -e writes
       # egg-info into the source dir). The world-api uses the SDK's
       # ReflexEngine + prompt builders to drive `managed=true` heroes

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
-import { WORLD_API_URL } from "@/lib/api";
+import { api } from "@/lib/api";
 import CopyToolModal from "@/components/showcase/CopyToolModal";
 
 type ToolDetail = {
@@ -29,11 +29,7 @@ export default function ToolDetailPage({
 
   useEffect(() => {
     let live = true;
-    fetch(`${WORLD_API_URL}/api/tools/${toolId}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
+    api.toolMeta(toolId)
       .then((d) => {
         if (live) setData(d);
       })

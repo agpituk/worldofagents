@@ -5,7 +5,10 @@ RUN pip install --no-cache-dir uv
 WORKDIR /app
 
 COPY pyproject.toml ./
-RUN uv sync --dev
+# `uv sync --dev` only picks up [dependency-groups.dev]; this project uses
+# the older [project.optional-dependencies] dev = [...] form, so we need
+# --extra dev to actually install pytest et al.
+RUN uv sync --extra dev
 
 COPY app/ ./app/
 COPY alembic/ ./alembic/

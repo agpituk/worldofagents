@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { WORLD_API_URL } from "@/lib/api";
+import { api } from "@/lib/api";
 
 const HeroBlocksRO = dynamic(() => import("@/components/HeroBlocksRO"), { ssr: false });
 
@@ -49,11 +49,7 @@ function ComparePage() {
   useEffect(() => {
     if (!heroes) return;
     let live = true;
-    fetch(`${WORLD_API_URL}/api/compare?heroes=${encodeURIComponent(heroes)}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
+    api.compareHeroes(heroes)
       .then((d) => {
         if (live) setData(d);
       })
