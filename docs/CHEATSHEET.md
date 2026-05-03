@@ -69,9 +69,11 @@ Levels 70 / 90 / 100 → "Skilled" / "Expert" / "Grandmaster" titles.
 | `recalled(tag)` / `recalled_any(*tags)` | tag ever in journal |
 
 **Sandbox rules** — `when:` is parsed through an AST allowlist. No
-`import`, no comprehensions, no `lambda`, no `:=`, hard cap of 200 calls
-per eval. Failures fire a `parse_failure` event (rose gutter on the
-hero page).
+`import`, no comprehensions, no `lambda`, no `:=`, no `**` (would freeze
+the tick loop on bigint), no attribute whose name starts with `_`
+(rules out `__class__`-style escapes — the binding `_perception` is
+fine, `obj._private` is not), hard cap of 200 calls per eval. Failures
+fire a `parse_failure` event (rose gutter on the hero page).
 
 ## `then:` actions
 

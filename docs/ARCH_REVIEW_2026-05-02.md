@@ -4,6 +4,19 @@
 **Scope:** ~150 source files across `world-api`, `llm-gateway`, `frontend`, `bot-sdk-python`
 **Branch:** `main` (HEAD `77d3e0c` — merge of `feature/agent-tools`)
 
+> **Snapshot — preserved for history.** All Critical and most High items
+> below were addressed in commit `006b2dd` (*arch-review cleanup: split
+> god-files, enforce DDD layering, fix test wiring*). In particular:
+> `world-api/app/core/actions.py` was split into the `actions/` package
+> (per Suggested Action #1); the `tests/` bind-mount was added to
+> `docker-compose.yml` (#2); the `showcase` and `hero` domains gained
+> `service.py`/`repository.py` modules and stopped going around them
+> (#3, #4); and `bot-sdk-python/client.py` was sliced into `client.py`
+> + `prompt.py` + `parser.py` (#5). Treat the metrics and file sizes
+> below as the pre-cleanup baseline; current line counts and coverage
+> figures will differ. Re-run an arch review against `main` for a
+> current picture.
+
 ---
 
 ## 🔴 Critical Issues (fix immediately)

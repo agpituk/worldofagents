@@ -5,6 +5,15 @@ the items below, which were deliberately scoped out. Each is sized for
 its own session — start the next one against any of them and they're
 self-contained.
 
+> **Note on file references.** Commit `006b2dd` split
+> `world-api/app/core/actions.py` into the package
+> `world-api/app/core/actions/` (`combat`, `contracts`, `dispatcher`,
+> `equipment`, `gathering`, `inventory`, `magic`, `movement`,
+> `perception`, `quests`, `sandbox`, `social`, `statuses`, `titles`,
+> `trade`). Line numbers below were captured against the pre-split
+> monolith; grep by symbol (`_resolve_look`, `_ranked_inventory`,
+> `replace_memory`, etc.) to find current locations.
+
 ## High-leverage but deferred for scope/risk
 
 ### P0-3 step 1 — single-retry parse fallback
