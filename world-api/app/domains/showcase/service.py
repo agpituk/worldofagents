@@ -7,6 +7,8 @@ router is a thin HTTP adapter on top of the methods exposed here.
 from __future__ import annotations
 
 import copy as _copy
+import threading
+import time
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -125,13 +127,33 @@ def index_hero(db: Session, hero: Hero, current_tick: int) -> None:
     db.flush()
 
 
-def index_all(db: Session) -> None:
-    """Index every alive hero's tools. Cheap enough for v1 traffic."""
+# Throttle window for the global re-index. Every read path under
+# /api/tools/* used to re-index every hero on every request, which
+# meant a botnet hammering the public showcase could exhaust the DB
+# write capacity. Indexing is idempotent and lazy, so a 60s cache is
+# fine: a hero that just registered shows up on the next refresh.
+_INDEX_TTL_SECONDS = 60.0
+_index_last_run: float = 0.0
+_index_lock = threading.Lock()
+
+
+def index_all(db: Session, *, force: bool = False) -> None:
+    """Index every alive hero's tools. Throttled: skips if the last
+    successful run was less than `_INDEX_TTL_SECONDS` ago. Pass
+    `force=True` from admin/test paths that need a fresh index now."""
+    global _index_last_run
+    if not force:
+        now = time.monotonic()
+        with _index_lock:
+            if now - _index_last_run < _INDEX_TTL_SECONDS:
+                return
     for h in repo.list_alive_heroes(db):
         if is_tools_private(h):
             continue
         index_hero(db, h, current_tick=0)
     db.commit()
+    with _index_lock:
+        _index_last_run = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +208,15 @@ def copy_tool(
     tool_id_value: str,
     by_hero: str,
     rename: str | None,
+    *,
+    owner_token: str,
 ) -> dict[str, Any]:
     """Append the tool to the target hero's manifest tools section, plus
-    record the copy event for the leaderboard. Per SHOWCASE.md §2.2."""
+    record the copy event for the leaderboard. Per SHOWCASE.md §2.2.
+
+    `owner_token` must match the target hero's auth_token — anyone can
+    request `/copy`, only the hero's owner can mutate its manifest.
+    """
     source = repo.get_definition(db, tool_id_value)
     if source is None:
         raise HTTPException(status_code=404, detail="tool not found")
@@ -199,6 +227,11 @@ def copy_tool(
     target = repo.get_hero_by_id(db, hid)
     if target is None:
         raise HTTPException(status_code=404, detail="hero not found")
+    # Same response shape as a missing hero, so an attacker can't probe
+    # for the existence of a hero by token-mismatch vs not-found.
+    from app.domains.hero.service import HeroService
+    if not HeroService.verify_owner(db, hid, owner_token):
+        raise HTTPException(status_code=403, detail="not the owner of by_hero")
 
     source_entry = yaml.safe_load(source.canonical_yaml) or {}
     if not isinstance(source_entry, dict):

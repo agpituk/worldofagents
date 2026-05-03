@@ -113,8 +113,12 @@ async def think(req: ThinkRequest) -> ThinkResponse:
     except NotImplementedError as exc:
         raise HTTPException(501, str(exc)) from exc
     except Exception as exc:
+        # Log the full exception (with stack + provider message) for the
+        # operator. The HTTP response gets a generic message — provider
+        # errors can include API keys or secrets in their text and we don't
+        # want to echo those back to the caller.
         log.exception("provider call failed")
-        raise HTTPException(502, f"provider error: {exc}") from exc
+        raise HTTPException(502, "provider error") from exc
 
     token = issue_token(
         hero_id=req.hero_id,

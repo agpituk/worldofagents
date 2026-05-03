@@ -16,6 +16,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.auth import optional_owner_token
 from app.core.database import get_db
 from app.core.models import Hero
 from app.domains.inspector import service
@@ -60,7 +61,7 @@ def tick_llm_call(
     db: Annotated[Session, Depends(get_db)],
     hero_id: str,
     tick: int,
-    owner_token: str | None = None,
+    owner_token: Annotated[str | None, Depends(optional_owner_token)] = None,
 ) -> dict[str, Any]:
     hid = _hero_id_or_404(db, hero_id)
     try:
@@ -73,7 +74,7 @@ def tick_llm_call(
 def latest_llm_call(
     db: Annotated[Session, Depends(get_db)],
     hero_id: str,
-    owner_token: str | None = None,
+    owner_token: Annotated[str | None, Depends(optional_owner_token)] = None,
 ) -> dict[str, Any]:
     hid = _hero_id_or_404(db, hero_id)
     return service.latest_llm_call(db, hid, owner_token=owner_token)

@@ -10,6 +10,7 @@ heavier than the read justifies.
 
 from __future__ import annotations
 
+import hmac
 import secrets
 import uuid
 from typing import Any
@@ -184,15 +185,30 @@ class HeroService:
         The single source of truth for owner-only checks across domains.
         Inspector and any future panels that gate on ownership go through
         this helper instead of reaching into Hero.auth_token directly.
+
+        Compares with `hmac.compare_digest` to avoid leaking auth_token
+        prefixes through response-time differences.
         """
         if not token:
             return False
         hero = db.get(Hero, hero_id)
-        return hero is not None and getattr(hero, "auth_token", None) == token
+        if hero is None:
+            return False
+        actual = getattr(hero, "auth_token", None)
+        if not actual:
+            return False
+        return hmac.compare_digest(actual, token)
 
     @staticmethod
-    def list_all(db: Session) -> list[Hero]:
-        return list(db.scalars(select(Hero).order_by(Hero.created_at.desc())))
+    def list_all(db: Session, *, limit: int = 200) -> list[Hero]:
+        # Bounded so a public GET /heroes can't pull the entire history
+        # in one request as the world grows.
+        limit = max(1, min(int(limit), 500))
+        return list(
+            db.scalars(
+                select(Hero).order_by(Hero.created_at.desc()).limit(limit)
+            )
+        )
 
     @staticmethod
     def list_alive(db: Session) -> list[Hero]:

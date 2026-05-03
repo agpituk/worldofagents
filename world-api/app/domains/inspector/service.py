@@ -224,21 +224,27 @@ def _shape_llm_call(payload: dict[str, Any], is_owner: bool) -> dict[str, Any]:
     reasoning = payload.get("reasoning_trace") or ""
     tool_names = [t.get("name") for t in payload.get("tools_offered") or []]
     mentions = sorted({n for n in tool_names if n and n in reasoning})
+    # The chosen_tool/args and tool list show what happened — that's the
+    # spectator-visible "action" surface and stays public. The LLM's
+    # *reasoning trace* is inner monologue that reveals strategy and
+    # any hero-private context the model wove into its plan; restrict
+    # to the owner along with prompt_text and operational metadata.
     out: dict[str, Any] = {
         "chosen_tool": payload.get("chosen_tool"),
         "chosen_args": payload.get("chosen_args"),
         "tools_offered": payload.get("tools_offered") or [],
-        "reasoning_trace": reasoning,
         "tool_mentions": mentions,
         "prompt_visible": is_owner,
     }
     if is_owner:
+        out["reasoning_trace"] = reasoning
         out["prompt_text"] = payload.get("prompt_text")
         out["tokens_in"] = payload.get("tokens_in")
         out["tokens_out"] = payload.get("tokens_out")
         out["tokens_budget"] = payload.get("tokens_budget")
         out["latency_ms"] = payload.get("latency_ms")
     else:
+        out["reasoning_trace"] = ""
         out["prompt_text"] = None
         out["tokens_in"] = None
         out["tokens_out"] = None

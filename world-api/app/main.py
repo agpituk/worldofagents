@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from alembic import command
 from alembic.config import Config
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core import models  # noqa: F401  (register all models so the registry is populated)
 from app.core.tick import tick_engine
@@ -85,12 +86,14 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="World of Agents — World API", version="0.1.0", lifespan=lifespan)
 
-# Spectator UI is hosted on a different origin (frontend at :47900). Allow all
-# origins in dev — the API is read-mostly and the WS path uses an auth token
-# on its own. Tighten before exposing to the public internet.
+# Spectator UI is on a different origin (frontend at :47900). Pin the
+# allowlist via CORS_ALLOW_ORIGINS in env so production doesn't ship a
+# wildcard. Default = dev frontend. Set to `*` to restore the previous
+# behaviour (only safe with allow_credentials=False, which we keep).
+_cors_origins = settings.cors_origins_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins if _cors_origins else ["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

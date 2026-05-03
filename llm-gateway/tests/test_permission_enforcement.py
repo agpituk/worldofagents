@@ -26,15 +26,23 @@ from app.main import app
 from app.permission import PermissionTokenError, verify
 
 
-def _sign_permission(*, hero_id: str, max_tokens: int, ttl: int = 30) -> str:
+def _sign_permission(
+    *, hero_id: str, max_tokens: int, ttl: int = 30, jti: str | None = "auto"
+) -> str:
     """Mirror world-api/app/core/gateway_permission.issue_permission_token."""
+    import secrets as _secrets
     now = int(time.time())
-    payload = {
+    payload: dict = {
         "hero_id": hero_id,
         "max_tokens": int(max_tokens),
         "iat": now,
         "exp": now + ttl,
     }
+    if jti == "auto":
+        payload["jti"] = _secrets.token_urlsafe(16)
+    elif jti is not None:
+        payload["jti"] = jti
+    # else: omit jti entirely (legacy token shape)
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     sig = hmac.new(
         settings.arena_shared_secret.encode(), payload_bytes, hashlib.sha256
@@ -75,6 +83,26 @@ def test_verify_rejects_expired():
     token = _sign_permission(hero_id="hero-a", max_tokens=512, ttl=-5)
     with pytest.raises(PermissionTokenError):
         verify(token)
+
+
+def test_verify_rejects_replay():
+    """Same token consumed twice within its TTL → second call raises."""
+    token = _sign_permission(hero_id="hero-replay", max_tokens=128)
+    claims1 = verify(token)
+    assert claims1.jti is not None
+    with pytest.raises(PermissionTokenError) as exc_info:
+        verify(token)
+    assert "replay" in str(exc_info.value)
+
+
+def test_verify_legacy_token_without_jti_still_accepted():
+    """Tokens minted before the jti rollout don't have one. They still
+    verify (signature + expiry only), just without replay protection."""
+    token = _sign_permission(hero_id="hero-legacy", max_tokens=128, jti=None)
+    claims = verify(token)
+    assert claims.jti is None
+    # Same legacy token verifies again — no jti, no replay guard.
+    verify(token)
 
 
 # ---- gateway enforcement (the FIX_PLAN done-when) -------------------------

@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import time
 
 from app.config import settings
@@ -28,6 +29,11 @@ def issue_token(*, hero_id: str, model: str, tokens: int, tick_id: int | None) -
         "tick_id": tick_id,
         "iat": now,
         "exp": now + settings.token_ttl_seconds,
+        # Per-token nonce — world-api records this on first verify and
+        # rejects subsequent submissions, so a captured gateway_token
+        # can't be replayed across multiple action submissions to inflate
+        # spending.
+        "jti": secrets.token_urlsafe(16),
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     sig = hmac.new(

@@ -153,8 +153,20 @@ export type Longevity = {
   hall_of_fame: LongevityRow[];
 };
 
-export async function fetchJson<T>(path: string): Promise<T> {
-  const r = await fetch(`${WORLD_API_URL}${path}`, { cache: "no-store" });
+export async function fetchJson<T>(
+  path: string,
+  opts: { ownerToken?: string | null } = {},
+): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (opts.ownerToken) {
+    // Header rather than query param so the auth_token is not logged
+    // by browsers (history) or proxies (access logs / Referer).
+    headers["X-Owner-Token"] = opts.ownerToken;
+  }
+  const r = await fetch(`${WORLD_API_URL}${path}`, {
+    cache: "no-store",
+    headers,
+  });
   if (!r.ok) throw new Error(`${path}: ${r.status} ${r.statusText}`);
   return r.json();
 }
@@ -262,18 +274,16 @@ export const api = {
     ),
   toolDetail: (heroId: string, toolName: string) =>
     fetchJson<ToolDetail>(`/api/heroes/${heroId}/tools/${toolName}`),
-  tickLlmCall: (heroId: string, tick: number, ownerToken?: string | null) => {
-    const qs = ownerToken ? `?owner_token=${encodeURIComponent(ownerToken)}` : "";
-    return fetchJson<TickLlmCall>(
-      `/api/heroes/${heroId}/ticks/${tick}/llm-call${qs}`,
-    );
-  },
-  latestLlmCall: (heroId: string, ownerToken?: string | null) => {
-    const qs = ownerToken ? `?owner_token=${encodeURIComponent(ownerToken)}` : "";
-    return fetchJson<LatestLlmCall>(
-      `/api/heroes/${heroId}/llm-call/latest${qs}`,
-    );
-  },
+  tickLlmCall: (heroId: string, tick: number, ownerToken?: string | null) =>
+    fetchJson<TickLlmCall>(
+      `/api/heroes/${heroId}/ticks/${tick}/llm-call`,
+      { ownerToken },
+    ),
+  latestLlmCall: (heroId: string, ownerToken?: string | null) =>
+    fetchJson<LatestLlmCall>(
+      `/api/heroes/${heroId}/llm-call/latest`,
+      { ownerToken },
+    ),
   listBounties: (status: "open" | "claimed" | "expired" | "all" = "open") =>
     fetchJson<Bounty[]>(`/bounties?status=${status}`),
   currentEvents: () => fetchJson<CurrentEvents>("/events/current"),
@@ -325,12 +335,16 @@ export const api = {
   copyTool: async (
     toolId: string,
     byHero: string,
+    ownerToken: string,
     rename?: string,
   ): Promise<{ appended?: boolean; rename_to?: string; [k: string]: any }> => {
     const url = new URL(`${WORLD_API_URL}/api/tools/${toolId}/copy`);
     url.searchParams.set("by_hero", byHero);
     if (rename) url.searchParams.set("rename", rename);
-    const r = await fetch(url.toString(), { method: "POST" });
+    const r = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "X-Owner-Token": ownerToken },
+    });
     if (!r.ok) {
       const detail = await r.json().catch(() => ({}));
       throw new Error(detail?.detail ?? `HTTP ${r.status}`);

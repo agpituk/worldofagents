@@ -48,11 +48,29 @@ def test_safe_expressions_compile(expr):
     ("(x := 1)", "NamedExpr"),
     # Lambdas would let a reflex smuggle in a closure to defer execution.
     ("lambda: 1", "Lambda"),
+    # Pow lets a single expression allocate an unbounded bigint and
+    # freeze the tick loop. No reflex grammar needs it today.
+    ("2 ** (10 ** 9)", "Pow"),
+    ("hp ** 2", "Pow"),
 ])
 def test_unsafe_nodes_refused(expr, expected_kind):
     with pytest.raises(UnsafeExpression) as exc_info:
         compile_safe(expr)
     assert exc_info.value.node_kind == expected_kind
+
+
+@pytest.mark.parametrize("expr", [
+    # Classic CPython sandbox escape — walks .__class__ to reach
+    # BuiltinImporter / Popen / etc.
+    "().__class__",
+    "().__class__.__bases__[0].__subclasses__()",
+    "value.__init__",
+    "obj._private",  # Single-underscore "private" attrs also blocked.
+])
+def test_dunder_attribute_access_refused(expr):
+    with pytest.raises(UnsafeExpression) as exc_info:
+        compile_safe(expr)
+    assert "starts with '_'" in str(exc_info.value)
 
 
 def test_syntax_error_propagates_as_syntax_error():
