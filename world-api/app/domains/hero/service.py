@@ -178,6 +178,19 @@ class HeroService:
         return db.scalar(select(Hero).where(Hero.auth_token == token))
 
     @staticmethod
+    def verify_owner(db: Session, hero_id: uuid.UUID, token: str | None) -> bool:
+        """True iff `token` matches the auth_token of the given hero.
+
+        The single source of truth for owner-only checks across domains.
+        Inspector and any future panels that gate on ownership go through
+        this helper instead of reaching into Hero.auth_token directly.
+        """
+        if not token:
+            return False
+        hero = db.get(Hero, hero_id)
+        return hero is not None and getattr(hero, "auth_token", None) == token
+
+    @staticmethod
     def list_all(db: Session) -> list[Hero]:
         return list(db.scalars(select(Hero).order_by(Hero.created_at.desc())))
 

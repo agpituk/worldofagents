@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { api, TickLlmCall } from "@/lib/api";
+import { ownerTokenFor } from "@/lib/heroOwnership";
 
 export default function TickLlmCallPage({
   params,
@@ -13,10 +14,15 @@ export default function TickLlmCallPage({
   const tickNum = Number(tick);
   const [data, setData] = useState<TickLlmCall | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    setToken(ownerTokenFor(id));
+  }, [id]);
 
   useEffect(() => {
     let live = true;
-    api.tickLlmCall(id, tickNum)
+    api.tickLlmCall(id, tickNum, token)
       .then((d) => {
         if (live) setData(d);
       })
@@ -26,7 +32,7 @@ export default function TickLlmCallPage({
     return () => {
       live = false;
     };
-  }, [id, tickNum]);
+  }, [id, tickNum, token]);
 
   if (error) {
     return (
@@ -63,6 +69,31 @@ export default function TickLlmCallPage({
       {data.chosen_args && Object.keys(data.chosen_args).length > 0 && (
         <p className="text-xs text-zinc-500 mb-4 font-mono">
           args: {JSON.stringify(data.chosen_args)}
+        </p>
+      )}
+
+      {data.prompt_visible && data.prompt_text && (
+        <section className="mb-6">
+          <div className="flex items-baseline justify-between mb-1">
+            <h2 className="text-sm uppercase tracking-wide text-zinc-400">
+              Prompt sent to model
+            </h2>
+            <div className="text-xs text-zinc-500 font-mono">
+              {(data.tokens_in ?? 0) + (data.tokens_out ?? 0)}
+              {data.tokens_budget ? ` / ${data.tokens_budget}` : ""} tokens
+              {data.latency_ms !== null && ` · ${data.latency_ms}ms`}
+            </div>
+          </div>
+          <pre className="whitespace-pre-wrap font-mono text-xs text-zinc-200 border border-zinc-800 rounded p-3 max-h-96 overflow-y-auto">
+            {data.prompt_text}
+          </pre>
+        </section>
+      )}
+
+      {!data.prompt_visible && (
+        <p className="text-xs text-zinc-500 mb-6 italic">
+          Prompt and token counts are hidden — only the hero's owner
+          (the browser that deployed it) can see them.
         </p>
       )}
 

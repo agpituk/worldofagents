@@ -36,6 +36,9 @@ class Build(BaseModel):
         return v
 
 
+TEMPLATE_AUTHOR_PLACEHOLDER = "@template"
+
+
 class HeroManifest(BaseModel):
     """The user-supplied manifest. We keep the full document under `extras`
     so future fields (composites, perception, reflexes, models) round-trip
@@ -47,6 +50,16 @@ class HeroManifest(BaseModel):
     bio: str = Field(default="", max_length=2000)
     build: Build
     extras: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("author")
+    @classmethod
+    def _author_not_placeholder(cls, v: str) -> str:
+        if v.strip().lower() == TEMPLATE_AUTHOR_PLACEHOLDER:
+            raise ValueError(
+                f"author is still the template placeholder "
+                f"({TEMPLATE_AUTHOR_PLACEHOLDER!r}); set your own handle"
+            )
+        return v
 
     @field_validator("build")
     @classmethod
