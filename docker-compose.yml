@@ -3,11 +3,16 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-arena}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arena}
+      # No fallback — Postgres refuses to start if POSTGRES_PASSWORD is
+      # not set in .env. Prevents shipping with a publicly-known default.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: ${POSTGRES_DB:-arena}
     ports:
-      # Host port deliberately uncommon to avoid colliding with other local Postgres instances.
-      - "${POSTGRES_HOST_PORT:-47432}:5432"
+      # Bound to 127.0.0.1 only — DB never reachable from anything but the
+      # host machine. Inside the docker network, world-api still talks to
+      # postgres:5432 normally. Host port is uncommon to avoid clashing
+      # with other local Postgres instances.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-47432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +24,9 @@ services:
   redis:
     image: redis:7
     ports:
-      - "${REDIS_HOST_PORT:-47379}:6379"
+      # Bound to 127.0.0.1 only — Redis has no auth by default and must
+      # never be exposed beyond the host machine.
+      - "127.0.0.1:${REDIS_HOST_PORT:-47379}:6379"
     volumes:
       - redis-data:/data
 
@@ -28,7 +35,9 @@ services:
       context: ./world-api
       dockerfile: Dockerfile
     environment:
-      ARENA_SHARED_SECRET: ${ARENA_SHARED_SECRET:-dev-secret}
+      # No ?:- default — world-api refuses to boot if ARENA_SHARED_SECRET is
+      # unset or matches a known placeholder. Set it in .env (see .env.example).
+      ARENA_SHARED_SECRET: ${ARENA_SHARED_SECRET:?ARENA_SHARED_SECRET must be set in .env}
       POSTGRES_USER: ${POSTGRES_USER:-arena}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arena}
       POSTGRES_DB: ${POSTGRES_DB:-arena}
@@ -106,7 +115,7 @@ services:
       context: ./llm-gateway
       dockerfile: Dockerfile
     environment:
-      ARENA_SHARED_SECRET: ${ARENA_SHARED_SECRET:-dev-secret}
+      ARENA_SHARED_SECRET: ${ARENA_SHARED_SECRET:?ARENA_SHARED_SECRET must be set in .env}
       GATEWAY_DEFAULT_PROVIDER: ${GATEWAY_DEFAULT_PROVIDER:-stub}
       CQ_BASE_URL: ${CQ_BASE_URL:-}
       CQ_API_KEY: ${CQ_API_KEY:-}

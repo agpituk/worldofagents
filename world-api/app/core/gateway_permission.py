@@ -25,6 +25,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import time
 
 from app.core.config import settings
@@ -51,6 +52,10 @@ def issue_permission_token(
         "max_tokens": int(max_tokens),
         "iat": now,
         "exp": now + ttl_seconds,
+        # Per-token nonce — gateway records this on first verify and
+        # rejects subsequent attempts within the TTL window. 16 random
+        # bytes is overkill given the short lifetime.
+        "jti": secrets.token_urlsafe(16),
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     sig = hmac.new(

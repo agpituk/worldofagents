@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { ownerTokenFor } from "@/lib/heroOwnership";
 
 type Hero = { id: string; name: string; alive: boolean };
 
@@ -34,10 +35,17 @@ export default function CopyToolModal({ toolId, toolName, onClose }: Props) {
 
   async function submit() {
     if (!selectedHero) return;
+    const token = ownerTokenFor(selectedHero);
+    if (!token) {
+      setError(
+        "You don't own this hero on this browser. Copy is only allowed for heroes you registered here.",
+      );
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const body = await api.copyTool(toolId, selectedHero, renameTo || undefined);
+      const body = await api.copyTool(toolId, selectedHero, token, renameTo || undefined);
       if (body.appended) {
         setSuccess(
           `Added "${renameTo || toolName}" to ${

@@ -4,8 +4,15 @@
     runner can import `arena_bot.*` under tests (the bot SDK is a
     sibling package in the same monorepo)."""
 
+import os
 import sys
 from pathlib import Path
+
+# Settings refuses to boot without a real ARENA_SHARED_SECRET. Set a
+# placeholder before `app.config` imports.
+os.environ.setdefault(
+    "ARENA_SHARED_SECRET", "test-secret-not-for-prod-rotate-me-1234567890"
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

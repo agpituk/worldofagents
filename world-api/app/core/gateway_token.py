@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 
 from app.core.config import settings
+from app.core.nonce import NonceReplayError, default_store
 
 
 class GatewayTokenError(Exception):
@@ -32,6 +33,7 @@ class GatewayTokenClaims:
     tick_id: int | None
     issued_at: int
     expires_at: int
+    jti: str | None
 
 
 def _b64url_decode(s: str) -> bytes:
@@ -60,8 +62,19 @@ def verify(token: str) -> GatewayTokenClaims:
         raise GatewayTokenError("bad payload") from exc
 
     now = int(time.time())
-    if claims.get("exp", 0) < now:
+    exp = int(claims.get("exp", 0))
+    if exp < now:
         raise GatewayTokenError("token expired")
+
+    # Replay guard. Tokens minted before the jti rollout still verify
+    # (no jti claim → no replay protection), but the gateway side now
+    # always emits one.
+    jti = claims.get("jti")
+    if jti:
+        try:
+            default_store.consume(str(jti), exp)
+        except NonceReplayError as exc:
+            raise GatewayTokenError("token replay") from exc
 
     return GatewayTokenClaims(
         hero_id=str(claims["hero_id"]),
@@ -69,5 +82,6 @@ def verify(token: str) -> GatewayTokenClaims:
         tokens=int(claims.get("tokens", 0)),
         tick_id=claims.get("tick_id"),
         issued_at=int(claims["iat"]),
-        expires_at=int(claims["exp"]),
+        expires_at=exp,
+        jti=str(jti) if jti else None,
     )

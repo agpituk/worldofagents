@@ -4,11 +4,12 @@ import asyncio
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
+from app.core.connection_limiter import zone_stream_limiter
 from app.core.database import get_db
 from app.core.narrator import narrate
 from app.core.tick import tick_engine
@@ -163,7 +164,11 @@ def get_zone(slug: str, db: Annotated[Session, Depends(get_db)]):
 
 
 @router.get("/{slug}/stream")
-async def stream_zone(slug: str, db: Annotated[Session, Depends(get_db)]):
+async def stream_zone(
+    slug: str,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+):
     """Server-Sent Events stream of all events occurring in this zone.
 
     Open with `curl -N http://localhost:47800/zones/<slug>/stream` to watch
@@ -173,11 +178,16 @@ async def stream_zone(slug: str, db: Annotated[Session, Depends(get_db)]):
     if z is None:
         raise HTTPException(404, "zone not found")
 
+    # Take a slot up front so an over-cap client gets 429 immediately
+    # rather than the connection lingering. The slot is held for the
+    # full lifetime of the generator below.
+    cm = zone_stream_limiter.slot(request)
+    cm.__enter__()
     queue = tick_engine.subscribe_zone(slug)
 
     async def event_generator():
-        yield {"event": "hello", "data": json.dumps({"zone": slug, "name": z.name})}
         try:
+            yield {"event": "hello", "data": json.dumps({"zone": slug, "name": z.name})}
             while True:
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=15.0)
@@ -192,5 +202,6 @@ async def stream_zone(slug: str, db: Annotated[Session, Depends(get_db)]):
                     yield {"event": "ping", "data": ""}
         finally:
             tick_engine.unsubscribe_zone(slug, queue)
+            cm.__exit__(None, None, None)
 
     return EventSourceResponse(event_generator())

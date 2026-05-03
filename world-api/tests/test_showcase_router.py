@@ -17,6 +17,16 @@ from app.domains.showcase.canonicalize import canonicalize, tool_id
 from app.domains.showcase.router import compare_router, router as showcase_router
 
 
+@pytest.fixture(autouse=True)
+def _reset_index_throttle():
+    """index_all() throttles to once-per-60s in production. Each test
+    builds a fresh DB and expects to see its heroes get indexed on the
+    first leaderboard hit, so reset the module-level timestamp."""
+    from app.domains.showcase import service as _svc
+    _svc._index_last_run = 0.0
+    yield
+
+
 @pytest.fixture
 def app_with_db():
     engine = create_engine(
@@ -168,6 +178,12 @@ def test_tool_detail_returns_users(app_with_db):
     assert user_names == {"alice", "bob"}
 
 
+def _h2_owner_headers(h2: str) -> dict[str, str]:
+    """Hero auth_tokens in the fixture are `a-<uuid>` / `b-<uuid>`. The
+    /copy endpoint requires the X-Owner-Token of the *target* hero."""
+    return {"X-Owner-Token": f"b-{h2}"}
+
+
 def test_copy_endpoint_records_copy_event(app_with_db):
     """The Copy event itself is recorded — even when the actual append
     is rejected by collision. (Once a rename succeeds, both the copy
@@ -179,7 +195,10 @@ def test_copy_endpoint_records_copy_event(app_with_db):
     patrol = db.execute(
         _select(ToolDefinition).where(ToolDefinition.name == "patrol")
     ).scalar_one()
-    r = client.post(f"/api/tools/{patrol.tool_id}/copy?by_hero={h2}")
+    r = client.post(
+        f"/api/tools/{patrol.tool_id}/copy?by_hero={h2}",
+        headers=_h2_owner_headers(h2),
+    )
     assert r.status_code == 200
     copies = list(db.scalars(_select(ToolCopy).where(
         ToolCopy.source_tool_id == patrol.tool_id,
@@ -196,8 +215,42 @@ def test_copy_with_unknown_hero_404s(app_with_db):
         _select(ToolDefinition).where(ToolDefinition.name == "safe_gather")
     ).scalar_one()
     fake_hid = uuid.uuid4()
-    r = client.post(f"/api/tools/{sg.tool_id}/copy?by_hero={fake_hid}")
+    # Owner-token check happens after the hero lookup; for an unknown
+    # hero we should still get 404, not 401.
+    r = client.post(
+        f"/api/tools/{sg.tool_id}/copy?by_hero={fake_hid}",
+        headers={"X-Owner-Token": "anything"},
+    )
     assert r.status_code == 404
+
+
+def test_copy_without_owner_token_is_401(app_with_db):
+    app, db, h1, h2 = app_with_db
+    client = TestClient(app)
+    client.get("/api/tools/leaderboards")
+    from sqlalchemy import select as _select
+    patrol = db.execute(
+        _select(ToolDefinition).where(ToolDefinition.name == "patrol")
+    ).scalar_one()
+    r = client.post(f"/api/tools/{patrol.tool_id}/copy?by_hero={h2}")
+    assert r.status_code == 401
+
+
+def test_copy_with_wrong_owner_token_is_403(app_with_db):
+    """The owner_token of hero1 must not be accepted as authorization
+    to mutate hero2's manifest."""
+    app, db, h1, h2 = app_with_db
+    client = TestClient(app)
+    client.get("/api/tools/leaderboards")
+    from sqlalchemy import select as _select
+    patrol = db.execute(
+        _select(ToolDefinition).where(ToolDefinition.name == "patrol")
+    ).scalar_one()
+    r = client.post(
+        f"/api/tools/{patrol.tool_id}/copy?by_hero={h2}",
+        headers={"X-Owner-Token": f"a-{h1}"},
+    )
+    assert r.status_code == 403
 
 
 def test_copy_appends_to_target_manifest(app_with_db):
@@ -209,7 +262,10 @@ def test_copy_appends_to_target_manifest(app_with_db):
     patrol = db.execute(
         _select(ToolDefinition).where(ToolDefinition.name == "patrol")
     ).scalar_one()
-    r = client.post(f"/api/tools/{patrol.tool_id}/copy?by_hero={h2}")
+    r = client.post(
+        f"/api/tools/{patrol.tool_id}/copy?by_hero={h2}",
+        headers=_h2_owner_headers(h2),
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["appended"] is True
@@ -232,14 +288,18 @@ def test_copy_collision_returns_rename_prompt(app_with_db):
     sg = db.execute(
         _select(ToolDefinition).where(ToolDefinition.name == "safe_gather")
     ).scalar_one()
+    headers = _h2_owner_headers(h2)
     # h2 already has safe_gather (shared) — so this collides.
-    r = client.post(f"/api/tools/{sg.tool_id}/copy?by_hero={h2}")
+    r = client.post(f"/api/tools/{sg.tool_id}/copy?by_hero={h2}", headers=headers)
     body = r.json()
     assert body["appended"] is False
     assert body["rename_to"] == "safe_gather"
 
     # Retry with rename
-    r2 = client.post(f"/api/tools/{sg.tool_id}/copy?by_hero={h2}&rename=safe_gather_v2")
+    r2 = client.post(
+        f"/api/tools/{sg.tool_id}/copy?by_hero={h2}&rename=safe_gather_v2",
+        headers=headers,
+    )
     assert r2.json()["appended"] is True
     bob = db.scalar(_select(Hero).where(Hero.name == "bob"))
     bob_names = [

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.core.auth import required_owner_token
 from app.core.database import get_db
 from app.domains.showcase import service
 
@@ -58,9 +59,12 @@ def copy_tool(
     db: Annotated[Session, Depends(get_db)],
     tool_id_value: str,
     by_hero: str,
+    owner_token: Annotated[str, Depends(required_owner_token)],
     rename: str | None = None,
 ) -> CopyResponse:
-    result = service.copy_tool(db, tool_id_value, by_hero, rename)
+    result = service.copy_tool(
+        db, tool_id_value, by_hero, rename, owner_token=owner_token
+    )
     return CopyResponse(**result)
 
 

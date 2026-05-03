@@ -8,17 +8,18 @@ FIX_PLAN P1-1's headline incident vector.
 This module provides:
 
   • compile_safe(expr) — pre-compiles the expression and refuses any
-    AST node outside the allowlist. The expensive shapes (comprehensions,
-    yields, walrus, attribute walks to non-allowed names) are rejected
-    at compile time, before they touch a hero.
+    AST node outside the allowlist, plus any Attribute access whose
+    name starts with `_` (rules out `().__class__.__bases__[...]`-style
+    object-introspection escapes that would otherwise reach
+    `BuiltinImporter` / `subprocess.Popen` / etc.).
   • CallCounter / wrap_callables — each reflex eval gets a fresh limit
     on helper invocations so a `hostile_visible() and hostile_visible()
     and ...` pyramid can't spin forever.
 
-Wall-clock timeout via thread + signal is deliberately deferred; with
-the AST allowlist + call counter, the remaining attack surface is
-"compute a huge int via **" which is a separate (mitigatable) hazard
-worth its own change.
+Pow (`**`) is intentionally NOT in the allowlist: a single
+`2 ** (10**9)` would freeze the tick loop on bigint allocation, and
+no current reflex grammar needs exponentiation. Re-introduce only with
+a bounded-exponent helper.
 """
 
 from __future__ import annotations
@@ -48,18 +49,20 @@ _ALLOWED_NODES: frozenset[type[ast.AST]] = frozenset({
     ast.IfExp,
     ast.Slice,
     ast.Starred, ast.keyword,
-    # Pow is allowed but expensive — see module docstring.
-    ast.Pow,
+    # Pow (**) intentionally omitted: 2**(10**9) would freeze the tick loop.
 })
 
 
 class UnsafeExpression(ValueError):
     """An expression contains an AST node we refuse to execute."""
 
-    def __init__(self, node: ast.AST, expr: str) -> None:
+    def __init__(self, node: ast.AST, expr: str, *, reason: str | None = None) -> None:
         self.node_kind = type(node).__name__
         self.expr = expr
-        super().__init__(f"unsafe AST node {self.node_kind!r} in reflex {expr!r}")
+        msg = f"unsafe AST node {self.node_kind!r} in reflex {expr!r}"
+        if reason:
+            msg += f" — {reason}"
+        super().__init__(msg)
 
 
 def compile_safe(expr: str) -> CodeType:
@@ -68,6 +71,15 @@ def compile_safe(expr: str) -> CodeType:
     for node in ast.walk(tree):
         if type(node) not in _ALLOWED_NODES:
             raise UnsafeExpression(node, expr)
+        # Block underscore-prefixed attribute access. Rules out the
+        # `().__class__.__bases__[0].__subclasses__()` family of escapes
+        # that walk the type tree to reach `BuiltinImporter` / `Popen` /
+        # etc. Single-underscore "private" attrs are also blocked since
+        # any escape worth worrying about goes through them.
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            raise UnsafeExpression(
+                node, expr, reason=f"attribute {node.attr!r} starts with '_'"
+            )
     return compile(tree, "<reflex>", "eval")
 
 

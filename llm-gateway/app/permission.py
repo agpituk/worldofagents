@@ -23,10 +23,12 @@ import time
 from dataclasses import dataclass
 
 from app.config import settings
+from app.nonce import NonceReplayError, default_store
 
 
 class PermissionTokenError(Exception):
-    """Raised when a permission token is malformed, mis-signed, or expired."""
+    """Raised when a permission token is malformed, mis-signed, expired, or
+    being replayed."""
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class PermissionClaims:
     max_tokens: int
     issued_at: int
     expires_at: int
+    jti: str | None
 
 
 def _b64url_decode(s: str) -> bytes:
@@ -62,12 +65,25 @@ def verify(token: str) -> PermissionClaims:
         raise PermissionTokenError("bad payload") from exc
 
     now = int(time.time())
-    if int(claims.get("exp", 0)) < now:
+    exp = int(claims.get("exp", 0))
+    if exp < now:
         raise PermissionTokenError("token expired")
+
+    # Replay guard. Tokens minted before the jti rollout still verify
+    # (no jti claim → no replay protection on those legacy tokens), but
+    # the world-api side now always emits a jti, so in practice every
+    # production token goes through this gate.
+    jti = claims.get("jti")
+    if jti:
+        try:
+            default_store.consume(str(jti), exp)
+        except NonceReplayError as exc:
+            raise PermissionTokenError("token replay") from exc
 
     return PermissionClaims(
         hero_id=str(claims["hero_id"]),
         max_tokens=int(claims["max_tokens"]),
         issued_at=int(claims.get("iat", 0)),
-        expires_at=int(claims["exp"]),
+        expires_at=exp,
+        jti=str(jti) if jti else None,
     )

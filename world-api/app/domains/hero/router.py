@@ -26,6 +26,22 @@ logger = logging.getLogger("world.hero")
 
 router = APIRouter(prefix="/heroes", tags=["heroes"])
 
+# Hard cap on uploaded manifest size. The largest example manifest in
+# bot-sdk-python/examples/ is ~3 KB; 1 MB is generous and still bounds
+# memory per request so an attacker can't OOM the worker with a 100 MB
+# upload.
+_MAX_MANIFEST_BYTES = 1_000_000
+
+
+async def _read_capped_manifest(manifest: UploadFile) -> bytes:
+    raw = await manifest.read(_MAX_MANIFEST_BYTES + 1)
+    if len(raw) > _MAX_MANIFEST_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"manifest exceeds {_MAX_MANIFEST_BYTES // 1000} KB cap",
+        )
+    return raw
+
 
 @router.post("/register", response_model=RegisterHeroResponse, status_code=201)
 async def register_hero(
@@ -33,7 +49,7 @@ async def register_hero(
     manifest: UploadFile = File(..., description="YAML or JSON manifest file"),
     managed: bool = False,
 ):
-    raw = await manifest.read()
+    raw = await _read_capped_manifest(manifest)
     try:
         parsed = HeroService.parse_manifest(raw)
     except Exception as exc:
@@ -56,8 +72,8 @@ async def register_hero(
 
 
 @router.get("", response_model=list[HeroOut])
-def list_heroes(db: Annotated[Session, Depends(get_db)]):
-    return [HeroOut.from_hero(h) for h in HeroService.list_all(db)]
+def list_heroes(db: Annotated[Session, Depends(get_db)], limit: int = 200):
+    return [HeroOut.from_hero(h) for h in HeroService.list_all(db, limit=limit)]
 
 
 @router.get("/longevity")
@@ -137,7 +153,7 @@ async def respawn(
 ):
     """Respawn after permadeath. Same build is reused; the old hero's
     death page persists."""
-    raw = await manifest.read()
+    raw = await _read_capped_manifest(manifest)
     try:
         parsed = HeroService.parse_manifest(raw)
     except Exception as exc:
