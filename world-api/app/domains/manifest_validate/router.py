@@ -32,6 +32,7 @@ from app.core.models import NPC, Recipe, Spell, Zone
 from app.core.verbs import VALID_VERBS
 from app.domains.hero.service import HeroService
 from app.domains.manifest_validate.clamp_table import CLAMP_TABLE
+from app.domains.manifest_validate.shared import META_VERBS, SDK_CONVENIENCE_VERBS
 from app.domains.manifest_validate.tools_validator import validate_tools
 
 # Re-exported here so existing imports `from ...router import VALID_VERBS`
@@ -144,6 +145,8 @@ async def validate_manifest(
                 if (
                     isinstance(verb, str)
                     and verb not in VALID_VERBS
+                    and verb not in META_VERBS
+                    and verb not in SDK_CONVENIENCE_VERBS
                     and verb not in composite_tool_names
                 ):
                     issues.append(Issue(

@@ -136,7 +136,11 @@ def build_context(perception) -> dict[str, Any]:
         return any(_manhattan(pos, h.get("pos", [0, 0])) <= 1 for h in heroes)
 
     def in_pvp_zone() -> bool:
-        return zone_kind != "sanctuary" and zone_kind != "unknown"
+        # Mirrors world-api's `_SANCTUARY_KINDS` in core/actions/combat.py.
+        # The sandbox is a tutorial pen — PvP is disallowed there too —
+        # so reflexes that fired `attack_hero` in sandbox just burned a
+        # tick on a guaranteed-fail action and starved the catch-all.
+        return zone_kind not in ("sanctuary", "sandbox", "unknown")
 
     memory_tags = set(v.get("memory_tags") or [])
 

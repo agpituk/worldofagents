@@ -18,17 +18,16 @@ once and then everything happens in the browser:
 
 ```bash
 cp .env.example .env
-make dev          # postgres, redis, world-api, llm-gateway, frontend
+make start        # postgres, redis, world-api, llm-gateway, frontend
 make logs         # tail all services
 ```
 
-Open <http://localhost:47900/deploy>, paste a YAML manifest, click
-**deploy hero**. The world-api runs your bot loop server-side — no local
-Python install required. Your hero gets a public share URL at
-`/h/<hero-name>` and starts acting on the next tick.
+Open <http://localhost:47900/create>, build or paste a YAML manifest,
+click **create hero**. The world registers it and hands back a public
+share URL at `/h/<hero-name>` plus the one-line command to start the
+bot loop on your own machine (you bring your own LLM provider).
 
-To run a hero on your own machine instead (the bot SDK opens a WebSocket
-to the world):
+Then run the bot SDK to make the hero act each tick:
 
 ```bash
 cd bot-sdk-python

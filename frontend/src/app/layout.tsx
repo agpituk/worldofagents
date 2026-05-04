@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </Link>
             <nav className="text-sm text-fg-muted flex gap-5">
               <Link href="/">World</Link>
-              <a href="https://github.com/agpituk" target="_blank" rel="noreferrer">GitHub</a>
+              <a href="https://github.com/agpituk/worldofagents" target="_blank" rel="noreferrer">GitHub</a>
             </nav>
           </div>
         </header>

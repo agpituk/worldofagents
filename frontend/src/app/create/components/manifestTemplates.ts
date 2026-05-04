@@ -31,7 +31,7 @@ hero:
     - when: "hostile_visible() and not enemy_in_range()"
       then: { do: move_to_nearest_hostile }
     # When no reflex matches, escalate to the model
-    - when: "true"
+    - when: "True"
       then: { do: invoke_llm }
 
   memory:

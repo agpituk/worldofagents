@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
 import httpx
 import websockets
-import yaml
 
 from arena_bot.parser import (
     PARSE_REASON_EMPTY,
@@ -38,6 +36,13 @@ from arena_bot.parser import (
     parse_json_action,
 )
 from arena_bot.prompt import build_action_prompt, build_tool_action_prompt
+from arena_bot.registration import (
+    _hero_exists,
+    _hero_id_by_name,
+    _slugify,
+    connect_or_register,
+    register_hero as _register_hero,
+)
 from arena_bot.types import Decision, Perception
 
 log = logging.getLogger("arena_bot")
@@ -61,17 +66,9 @@ __all__ = [
 ]
 
 
-def _slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "hero"
-
-
-async def _hero_exists(world_url: str, hero_id: str) -> bool:
-    try:
-        async with httpx.AsyncClient(base_url=world_url.rstrip("/"), timeout=5.0) as client:
-            r = await client.get(f"/heroes/{hero_id}")
-            return r.status_code == 200
-    except httpx.HTTPError:
-        return False
+# `_slugify`, `_hero_exists`, `_hero_id_by_name` moved to registration.py
+# and re-imported above for back-compat with anything that grew an
+# `arena_bot.client` import for them.
 
 
 class Hero:
@@ -99,19 +96,12 @@ class Hero:
         world_url: str,
         gateway_url: str,
     ) -> "Hero":
-        manifest_bytes = Path(manifest_path).read_bytes()
-        async with httpx.AsyncClient(base_url=world_url.rstrip("/"), timeout=15.0) as client:
-            files = {"manifest": (Path(manifest_path).name, manifest_bytes, "application/yaml")}
-            r = await client.post("/heroes/register", files=files)
-            r.raise_for_status()
-            body = r.json()
-        log.info("registered hero %s (%s)", body["name"], body["id"])
+        hero_id, name, auth_token = await _register_hero(
+            manifest_path=manifest_path, world_url=world_url
+        )
         return cls(
-            hero_id=body["id"],
-            name=body["name"],
-            auth_token=body["auth_token"],
-            world_url=world_url,
-            gateway_url=gateway_url,
+            hero_id=hero_id, name=name, auth_token=auth_token,
+            world_url=world_url, gateway_url=gateway_url,
         )
 
     # ------------------------------------------------------------------- connect
@@ -123,56 +113,22 @@ class Hero:
         world_url: str,
         gateway_url: str,
         cache_dir: str | Path | None = None,
+        auth_token: str | None = None,
     ) -> "Hero":
-        manifest_path = Path(manifest_path)
-        manifest = yaml.safe_load(manifest_path.read_bytes())
-        inner = manifest["hero"] if "hero" in manifest and "name" not in manifest else manifest
-        name = inner["name"]
-        slug = _slugify(name)
-
-        cache_root = Path(cache_dir) if cache_dir else manifest_path.parent / ".arena-cache"
-        cache_root.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_root / f"{slug}.json"
-
-        if cache_file.exists():
-            try:
-                cached = json.loads(cache_file.read_text())
-                if await _hero_exists(world_url, cached["hero_id"]):
-                    log.info("resuming cached hero %s (%s)", cached["name"], cached["hero_id"])
-                    return cls(
-                        hero_id=cached["hero_id"],
-                        name=cached["name"],
-                        auth_token=cached["auth_token"],
-                        world_url=world_url,
-                        gateway_url=gateway_url,
-                    )
-                log.info("cached hero %s no longer in world — re-registering", name)
-            except (KeyError, json.JSONDecodeError) as exc:
-                log.warning("cache file unreadable (%s) — re-registering", exc)
-
-        try:
-            hero = await cls.register(
-                manifest_path=manifest_path, world_url=world_url, gateway_url=gateway_url
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 409:
-                raise RuntimeError(
-                    f"Hero name '{name}' is already registered in the world but no "
-                    f"local cache for it exists. Either:\n"
-                    f"  • delete the orphan: docker compose exec -T postgres psql "
-                    f"-U arena -d arena -c \"DELETE FROM heroes WHERE name='{name}';\"\n"
-                    f"  • or wipe the world: docker compose down -v && docker compose up -d\n"
-                    f"  • or rename your hero in the manifest"
-                ) from exc
-            raise
-        cache_file.write_text(
-            json.dumps(
-                {"hero_id": hero.hero_id, "name": hero.name, "auth_token": hero.auth_token},
-                indent=2,
-            )
+        """Resolve a hero from cache, an injected `auth_token`, or a
+        fresh registration — in that order. The hand-off logic lives
+        in `registration.connect_or_register`; this method just wraps
+        the result in a Hero instance with the gateway URL attached."""
+        hero_id, name, token = await connect_or_register(
+            manifest_path=manifest_path,
+            world_url=world_url,
+            cache_dir=cache_dir,
+            auth_token=auth_token,
         )
-        log.info("cached credentials at %s", cache_file)
-        return hero
+        return cls(
+            hero_id=hero_id, name=name, auth_token=token,
+            world_url=world_url, gateway_url=gateway_url,
+        )
 
     # --------------------------------------------------------------------- run
     async def run(self) -> None:

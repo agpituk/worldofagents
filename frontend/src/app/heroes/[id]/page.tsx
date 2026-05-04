@@ -145,7 +145,7 @@ export default function HeroPage({ params }: { params: Promise<{ id: string }> }
             {copied ? "copied!" : `share /h/${hero.name}`}
           </button>
           <Link
-            href={`/deploy?fork=${hero.id}`}
+            href={`/create?fork=${hero.id}`}
             className="text-xs text-emerald-400 hover:text-emerald-300 border border-border bg-bg-card px-3 py-1"
           >
             fork this hero

@@ -1,6 +1,6 @@
 # Manifest Schema
 
-Every hero is a YAML file. Submit it via `/deploy` or `python -m arena_bot
+Every hero is a YAML file. Submit it via `/create` or `python -m arena_bot
 your.yaml`. This is the full schema.
 
 ```yaml

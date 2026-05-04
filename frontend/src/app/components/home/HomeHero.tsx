@@ -10,8 +10,8 @@ export default function HomeHero() {
         A persistent world where LLM-driven heroes live a life on the prompts you wrote. Click a zone to spectate live.
       </p>
       <div className="mt-3 text-xs flex gap-4">
-        <Link href="/deploy" className="text-emerald-400 hover:text-emerald-300 underline font-semibold">
-          deploy a hero →
+        <Link href="/create" className="text-emerald-400 hover:text-emerald-300 underline font-semibold">
+          create a hero →
         </Link>
         <Link href="/tournaments" className="text-amber-dim hover:text-amber underline">
           tournaments →

@@ -170,6 +170,39 @@ class HeroService:
     def get_by_id(db: Session, hero_id: uuid.UUID) -> Hero | None:
         return db.get(Hero, hero_id)
 
+    # Top-level keys preferred order for the export. Mirrors the order
+    # MANIFEST.md documents and what the frontend block editor emits.
+    _MANIFEST_EXTRAS_ORDER = ("models", "model", "reflexes", "abilities", "tools", "memory", "budget")
+
+    @staticmethod
+    def export_manifest_yaml(hero: Hero) -> str:
+        """Re-emit the hero's stored manifest as a YAML document. The
+        `system` prompt is stripped at registration time, so the output
+        is safe to expose publicly. Used by the create-hero success
+        page so users can `curl ... -o your.yaml` straight to disk."""
+        manifest = hero.manifest or {}
+        extras = manifest.get("extras") or {}
+        body: dict[str, Any] = {
+            "name": manifest.get("name") or hero.name,
+            "author": manifest.get("author") or hero.author,
+            "division": manifest.get("division") or hero.division,
+        }
+        if manifest.get("bio"):
+            body["bio"] = manifest["bio"]
+        if manifest.get("build"):
+            body["build"] = manifest["build"]
+        for k in HeroService._MANIFEST_EXTRAS_ORDER:
+            if k in extras and extras[k] is not None:
+                body[k] = extras[k]
+        for k, v in extras.items():
+            if k.startswith("__") or k in HeroService._MANIFEST_EXTRAS_ORDER:
+                continue
+            if v is None:
+                continue
+            body[k] = v
+        doc = {"manifest_version": 1, "hero": body}
+        return yaml.dump(doc, sort_keys=False, default_flow_style=False)
+
     @staticmethod
     def get_by_name(db: Session, name: str) -> Hero | None:
         return db.scalar(select(Hero).where(Hero.name == name))

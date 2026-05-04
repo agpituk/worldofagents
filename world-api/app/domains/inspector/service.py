@@ -217,6 +217,7 @@ def _empty_llm_call(is_owner: bool) -> dict[str, Any]:
         "tokens_out": None,
         "tokens_budget": None,
         "latency_ms": None,
+        "error": None,
     }
 
 
@@ -235,6 +236,10 @@ def _shape_llm_call(payload: dict[str, Any], is_owner: bool) -> dict[str, Any]:
         "tools_offered": payload.get("tools_offered") or [],
         "tool_mentions": mentions,
         "prompt_visible": is_owner,
+        # Gateway/provider error (if any). Public so the spectator UI
+        # can show "the gateway is down" alongside the tool list — much
+        # less mysterious than an empty `tools_offered` with no reason.
+        "error": payload.get("error"),
     }
     if is_owner:
         out["reasoning_trace"] = reasoning

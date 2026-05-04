@@ -1,10 +1,12 @@
 "use client";
 
-// Hosted deploy page — paste a YAML manifest, register a hero, get a share
-// URL and the runtime command. The actual bot-runner still runs locally
-// (the `python -m arena_bot ...` command) — a managed runtime is on the
-// roadmap but not in scope today. This page is the onboarding wall removal:
-// no clone, no make dev, just paste-and-go.
+// Hero create page — paste/build a YAML manifest, validate, register
+// it with the world-api, and hand back the share URL + the one-liner
+// to run the bot locally via `python -m arena_bot ...`. We do NOT run
+// the bot loop server-side anymore: managed mode falsely promised
+// activity even when no LLM provider was configured. Players run their
+// own bot, against their own LLM provider; the world only owns
+// registration + state + spectator views.
 
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -16,17 +18,17 @@ import DeployIntro from "./components/DeployIntro";
 import ValidationPanel from "./components/ValidationPanel";
 import SimulationPanel from "./components/SimulationPanel";
 import ToolsPreview from "./components/ToolsPreview";
-import ManagedToggle from "./components/ManagedToggle";
 import DeployActions from "./components/DeployActions";
 import PostDeploySuccess, { type RegisteredHero } from "./components/PostDeploySuccess";
 import { STARTER_MANIFEST, manifestYamlFromHero } from "./components/manifestTemplates";
 import BuildPanel, { parseBuild } from "./components/BuildPanel";
+import HeroDetailsPanel, { getHeroDetailsBlockReason } from "./components/HeroDetailsPanel";
 import TemplateModal from "./components/TemplateModal";
 import type { Archetype } from "./templates/templates";
 
 const ONBOARDED_KEY = "worldofagents:onboarded";
 
-// Blockly is heavy (~280KB gzipped) — lazy-load only on /deploy.
+// Blockly is heavy (~280KB gzipped) — lazy-load only on /create.
 const BlockEditor = dynamic(() => import("@/components/BlockEditor"), {
   ssr: false,
   loading: () => (
@@ -43,7 +45,6 @@ function DeployFormBody() {
   const [forkSource, setForkSource] = useState<string | null>(null);
   const [templateName, setTemplateName] = useState<string | null>(null);
   const [showTemplateModal, setShowTemplateModal] = useState(false);
-  const [managed, setManaged] = useState(true); // default ON — paste-and-go
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,7 +78,7 @@ function DeployFormBody() {
   }
 
   // Phase 8 — load the source hero's public manifest and prefill the
-  // textarea when /deploy?fork=<id> is opened. Failure is silent so a
+  // textarea when /create?fork=<id> is opened. Failure is silent so a
   // stale URL doesn't lock anyone out — they can still type freely.
   useEffect(() => {
     if (!forkId) return;
@@ -114,9 +115,9 @@ function DeployFormBody() {
     setError(null);
     setSubmitting(true);
     try {
-      const r = await api.registerHero(manifest, { managed });
+      const r = await api.registerHero(manifest, { managed: false });
       rememberOwnedHero(r.id, r.auth_token);
-      setRegistered({ ...r, managed });
+      setRegistered({ ...r, managed: false });
     } catch (e: any) {
       setError(String(e?.message ?? "registration failed"));
     } finally {
@@ -161,6 +162,7 @@ function DeployFormBody() {
           setManifest(STARTER_MANIFEST);
           setTemplateName(null);
         }}
+        onBrowseTemplates={() => setShowTemplateModal(true)}
       />
 
       {templateName && (
@@ -171,6 +173,14 @@ function DeployFormBody() {
           <span>— edit freely. Replace the <code>@template</code> author with your handle.</span>
         </div>
       )}
+
+      <HeroDetailsPanel
+        value={manifest}
+        onChange={(next) => {
+          setManifest(next);
+          setValidation(null);
+        }}
+      />
 
       <BuildPanel
         value={manifest}
@@ -204,14 +214,14 @@ function DeployFormBody() {
         <ToolsPreview tools={validation.summary.tools} />
       )}
 
-      <ManagedToggle managed={managed} onChange={setManaged} />
-
       <DeployActions
         manifest={manifest}
         submitting={submitting}
         error={error}
         onDeploy={deploy}
         disabledReason={(() => {
+          const detailsIssue = getHeroDetailsBlockReason(manifest);
+          if (detailsIssue) return detailsIssue;
           const b = parseBuild(manifest);
           if (!b) return null;
           const total = b.str + b.dex + b.con + b.int + b.wis + b.cha;

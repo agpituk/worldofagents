@@ -1,7 +1,7 @@
 // Web-onboarding starter templates. Snapshots of bot-sdk-python/examples/*.yaml
-// with `hero.author` set to "@template" so the server-side guard rejects deploys
+// with `hero.author` set to "@template" so the server-side guard rejects creates
 // that haven't replaced it. The bot-sdk versions stay canonical for SDK users
-// running them locally; these are the on-ramp variants for /deploy.
+// running them locally; these are the on-ramp variants for /create.
 
 export type ArchetypeKey =
   | "warrior"
@@ -65,6 +65,10 @@ hero:
       then: { do: attack_nearest_hostile }
     - when: "hostile_visible() and not enemy_in_range()"
       then: { do: move_to_nearest_hostile }
+    # Catch-all — let the model decide when no reflex matches (e.g.
+    # while in sandbox protection, or once Marek's job is done).
+    - when: "True"
+      then: { do: invoke_llm }
 
   memory:
     initial:
@@ -128,6 +132,10 @@ hero:
       then: { do: travel, zone: market_square }
     - when: "zone == 'market_square' and in_inventory('iron_ore') and pos_x == 7 and pos_y == 8"
       then: { do: craft, recipe: iron_sword_recipe }
+    # Catch-all — when none of the loop conditions apply (e.g. sandbox
+    # protection, unexpected zone), escalate so the hero isn't idle.
+    - when: "True"
+      then: { do: invoke_llm }
 
   memory:
     initial:
@@ -185,6 +193,10 @@ hero:
     - when: "in_inventory('scroll_mend')"
       then: { do: learn, scroll: scroll_mend }
     - when: "zone == 'hush_wood' and hostile_visible() and 'firebolt' in _perception.your_state.get('known_spells', [])"
+      then: { do: invoke_llm }
+    # Catch-all — when no learn/cast/flee reflex matches, ask the model
+    # what to do (e.g. sandbox, or after the lesson loop finishes).
+    - when: "True"
       then: { do: invoke_llm }
 
   memory:
@@ -245,6 +257,10 @@ hero:
       then: { do: steal, target: marek, item: bread }
     - when: "zone == 'cracked_tankard' and adjacent_to('marek') and not in_inventory('small_potion')"
       then: { do: steal, target: marek, item: small_potion }
+    # Catch-all — when neither loot-loop reflex applies (sandbox spawn,
+    # post-heist, etc.), let the model pick the next move.
+    - when: "True"
+      then: { do: invoke_llm }
 
   memory:
     initial:
@@ -298,6 +314,10 @@ hero:
       then: { do: travel, zone: hush_wood }
     - when: "zone == 'hush_wood' and not any_hero_visible()"
       then: { do: move, target: [6, 6] }
+    # Catch-all — when no PvP target is in sight (sandbox spawn,
+    # downtime), let the model pick a move so the hunter isn't idle.
+    - when: "True"
+      then: { do: invoke_llm }
 
   memory:
     initial:

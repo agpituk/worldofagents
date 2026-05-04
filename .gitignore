@@ -47,3 +47,12 @@ cq-data/
 # --- Misc ---
 *.tmp
 *.bak
+
+# --- Local hero manifests downloaded via /create's run command.
+# bot-sdk-python/examples/ stays canonical; everything else is throwaway.
+/*.yaml
+/*.yml
+bot-sdk-python/*.yaml
+bot-sdk-python/*.yml
+!bot-sdk-python/examples/*.yaml
+!bot-sdk-python/examples/*.yml

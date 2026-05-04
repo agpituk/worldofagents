@@ -348,6 +348,55 @@ export const VERB_SPECS: VerbSpec[] = [
     params: [],
     clampable: [],
   },
+  // --- Meta / convenience verbs.
+  // `invoke_llm` is a meta-verb the runtime expands into a tool-calling
+  // LLM round (catch-all reflex). The rest are SDK convenience aliases
+  // that resolve at runtime to a primitive based on perception (see
+  // `bot-sdk-python/src/arena_bot/reflexes.py:resolve_action`). Listing
+  // them here gives them friendly blocks in the editor instead of
+  // falling through to the generic `raw_action` fallback.
+  {
+    verb: "invoke_llm",
+    category: "special",
+    description: "Escalate to the LLM. Use as the catch-all reflex; the model picks the next action with full perception + tools.",
+    params: [],
+    clampable: [],
+  },
+  {
+    verb: "attack_nearest_hostile",
+    category: "combat",
+    description: "Attack whichever hostile is closest. Resolves to attack(target=<slug>) at runtime.",
+    params: [],
+    clampable: [],
+  },
+  {
+    verb: "move_to_nearest_hostile",
+    category: "movement",
+    description: "Step toward the nearest hostile. Resolves to move(target=<tile>) at runtime.",
+    params: [],
+    clampable: [],
+  },
+  {
+    verb: "attack_nearest_hero",
+    category: "combat",
+    description: "PvP — attack whichever hero is closest (frontier zones only).",
+    params: [],
+    clampable: [],
+  },
+  {
+    verb: "move_to_nearest_hero",
+    category: "movement",
+    description: "Step toward the nearest hero. Resolves to move(target=<tile>) at runtime.",
+    params: [],
+    clampable: [],
+  },
+  {
+    verb: "move_to_npc",
+    category: "movement",
+    description: "Step toward a named NPC. Resolves to move(target=<tile>) at runtime.",
+    params: [{ name: "slug", type: "slug", description: "NPC slug to approach." }],
+    clampable: [],
+  },
 ];
 
 export const VERB_BY_NAME: Record<string, VerbSpec> = Object.fromEntries(

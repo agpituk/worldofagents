@@ -31,7 +31,7 @@ const ENTRIES: { term: string; defn: string }[] = [
   {
     term: "Manifest",
     defn:
-      "The YAML/JSON document you submit on /deploy. Schema in DESIGN.md §7. Validated for shape + cross-references on the validate endpoint before you commit.",
+      "The YAML/JSON document you submit on /create. Schema in DESIGN.md §7. Validated for shape + cross-references on the validate endpoint before you commit.",
   },
   {
     term: "Division",

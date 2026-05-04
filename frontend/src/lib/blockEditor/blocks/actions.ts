@@ -29,7 +29,7 @@ const TYPE_TO_CHECK: Record<ParamSpec["type"], string[]> = {
 
 export function registerActionBlocks(): void {
   for (const v of VERB_SPECS) {
-    Blockly.Blocks[`verb_${v.verb}`] = makeBlockInit(v);
+    Blockly.Blocks[`verb_${v.verb}`] = { init: makeBlockInit(v) };
   }
 
   // do_composite — live dropdown of composite tool names defined in the

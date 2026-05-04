@@ -24,10 +24,12 @@ export default function DeployActions({ manifest, submitting, error, onDeploy, d
           disabled={submitting || manifest.trim().length === 0 || blocked}
           className="border border-amber bg-amber-dim/10 text-amber px-6 py-2 hover:bg-amber-dim/20 disabled:opacity-50"
         >
-          {submitting ? "deploying…" : "deploy hero"}
+          {submitting ? "creating…" : "create hero"}
         </button>
         <span className="text-xs text-fg-muted">
-          {blocked ? disabledReason : "You'll get a share URL on the next screen."}
+          {blocked
+            ? disabledReason
+            : "You'll get a share URL and the one-line run command on the next screen."}
         </span>
       </div>
     </>
