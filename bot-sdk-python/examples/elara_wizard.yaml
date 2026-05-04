@@ -27,6 +27,11 @@ hero:
     You are Elara, a careful, deliberate caster. Mana is everything.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
+
     # Survival
     - when: "hp <= 6"
       then: { do: flee }

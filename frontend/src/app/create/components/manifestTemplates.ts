@@ -24,6 +24,10 @@ hero:
   model: cheap
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
     - when: "hp <= 8"
       then: { do: flee }
     - when: "enemy_in_range()"

@@ -51,6 +51,10 @@ hero:
     You are Bromir. Cautious in combat, generous in trade.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
     - when: "hp <= 8"
       then: { do: flee }
     - when: "any_hero_adjacent() and in_pvp_zone()"
@@ -116,6 +120,10 @@ hero:
     You are Tova. A craftswoman, not a hero.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
     - when: "hp <= 8"
       then: { do: flee }
     - when: "enemy_in_range()"
@@ -178,6 +186,10 @@ hero:
     You are Elara, a careful, deliberate caster. Mana is everything.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
     - when: "hp <= 6"
       then: { do: flee }
     - when: "hp <= 14 and 'mend' in _perception.your_state.get('known_spells', []) and _perception.your_state.get('mana', 0) >= 4"
@@ -245,6 +257,10 @@ hero:
     You are Quill. Take more than you give. Run faster than you fight.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
     - when: "hp <= 12"
       then: { do: flee }
     - when: "any_hero_adjacent() and in_pvp_zone()"
@@ -302,6 +318,10 @@ hero:
     You are Lyra Quickfoot, hunter of heroes. Move fast, strike first.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
     - when: "hp <= 6"
       then: { do: flee }
     - when: "any_hero_adjacent() and in_pvp_zone()"

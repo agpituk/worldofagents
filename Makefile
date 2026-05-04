@@ -1,4 +1,4 @@
-.PHONY: help start stop logs migrate revision shell-world shell-gateway test test-cov test-cov-sdk test-cov-gateway test-cov-all
+.PHONY: help start stop logs migrate revision shell-world shell-gateway test test-cov test-cov-sdk test-cov-gateway test-cov-all smoke-templates smoke-clean
 
 help:
 	@echo "make start        - bring up all services"
@@ -13,6 +13,8 @@ help:
 	@echo "make test-cov-sdk - run bot-sdk-python pytest with coverage"
 	@echo "make test-cov-gateway - run llm-gateway pytest with coverage"
 	@echo "make test-cov-all - run coverage across all Python services"
+	@echo "make smoke-templates - end-to-end test that base templates produce playing heroes"
+	@echo "make smoke-clean   - delete all heroes registered by smoke-templates and their rows"
 
 start:
 	docker compose up -d --build
@@ -50,3 +52,9 @@ test-cov-gateway:
 	cd llm-gateway && uv run pytest --cov=app --cov-report=term-missing -q
 
 test-cov-all: test-cov test-cov-sdk test-cov-gateway
+
+smoke-templates:
+	./scripts/smoke_templates.sh
+
+smoke-clean:
+	./scripts/smoke_clean.sh
