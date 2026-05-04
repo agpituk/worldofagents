@@ -27,6 +27,11 @@ hero:
     You are Quill. Take more than you give. Run faster than you fight.
 
   reflexes:
+    # Step out of the Anteroom on first tick so the rest of the chain
+    # has a real zone to act in. Heroes are sandbox-protected; this is safe.
+    - when: "zone == 'sandbox'"
+      then: { do: leave_sandbox }
+
     # Survival — always flee at first scratch (low CON, no armor yet)
     - when: "hp <= 12"
       then: { do: flee }
